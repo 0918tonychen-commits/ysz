@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的烘培照片</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; margin-top: 50px; }
+        img { max-width: 80%; height: auto; border: 2px solid #ccc; border-radius: 8px; box-shadow: 2px 2px 8px rgba(0,0,0,0.2); }
+        a { display: inline-block; margin-top: 20px; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>這是您網站上的照片：88888.jpg</h1>
+
+    <img src="{{ photo_url }}" alt="烘培照片">
+
+    <p>圖片來源於靜態檔案服務。</p>
+    <a href="/">返回首頁</a>
+</body>
+</html>
