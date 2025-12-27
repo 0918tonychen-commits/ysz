@@ -1,43 +1,72 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles 
-from fastapi.templating import Jinja2Templates 
+from flask import Flask
+import serial
+import time
 
-# 實例化 FastAPI 應用
-app = FastAPI()
+app = Flask(__name__)
 
-# --- 1. 配置靜態檔案目錄 ---
-# 讓 FastAPI 知道如何提供 static/ 資料夾中的圖片、CSS 等檔案
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# 設定 Arduino 連接 (請確認 COM port)
+try:
+    ser = serial.Serial('COM5', 9600, timeout=2)
+    time.sleep(2) # 等待 Arduino 重啟
+except Exception as e:
+    print(f"無法連接序列埠: {e}")
 
-# --- 2. 配置 HTML 模板目錄 ---
-templates = Jinja2Templates(directory="templates")
-
-# --- 網站路由 (路徑) ---
-
-# 根路徑 "/" (首頁) - 顯示 index.html
-@app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
-        {"request": request} 
-    )
-
-# 顯示照片的專用路徑 "/photo"
-@app.get("/photo", response_class=HTMLResponse)
-async def show_bakery_photo(request: Request):
-    # 這裡已替換成您的圖片名稱
-    photo_filename = "88888.jpg" 
+@app.route('/')
+def index():
+    temp = "N/A"
+    hum = "N/A"
     
-    # photo_url 是圖片在網站上的完整路徑
-    photo_url = f"/static/images/{photo_filename}" 
-    
-    return templates.TemplateResponse(
-        "photo.html",
-        {"request": request, "photo_url": photo_url}
-    )
+    try:
+        # 核心優化：清空舊緩衝區，抓取最新資料
+        ser.reset_input_buffer()
+        
+        # 讀取一行並解碼
+        line = ser.readline().decode('utf-8').strip()
+        
+        # 檢查是否包含逗號 (確保是我們想要的數據格式)
+        if "," in line:
+            data = line.split(',')
+            if len(data) == 2:
+                temp = data[0]
+                hum = data[1]
+        else:
+            # 如果第一行沒抓到(可能是剛啟動的文字)，再嘗試讀一次
+            line = ser.readline().decode('utf-8').strip()
+            if "," in line:
+                data = line.split(',')
+                temp, hum = data[0], data[1]
 
-# 原有的 "/about" 路徑
-@app.get("/about")
-def about():
-    return {"message": "我的第一個 FastAPI 應用"}         
+    except Exception as e:
+        print(f"讀取錯誤: {e}")
+        temp, hum = "Error", "Error"
+
+    return f"""
+    <html>
+    <head>
+        <title>Arduino MKR 1310 SHT31</title>
+        <meta http-equiv="refresh" content="2">
+        <style>
+            body {{ font-family: 'Segoe UI', Arial, sans-serif; text-align: center; margin-top: 50px; background-color: #f4f4f9; }}
+            .container {{ display: inline-block; padding: 20px; background: white; border-radius: 15px; shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            h1 {{ color: #333; }}
+            .data {{ font-size: 24px; color: #007bff; font-weight: bold; }}
+            .label {{ color: #555; margin-top: 10px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Arduino SHT31 監測站</h1>
+            <div class="label">當前溫度</div>
+            <div class="data">{temp} °C</div>
+            <hr>
+            <div class="label">當前濕度</div>
+            <div class="data">{hum} %</div>
+        </div>
+    </body>
+    </html>
+    """
+
+if __name__ == '__main__':
+    # host='0.0.0.0' 允許同區域網路的其他裝置存取
+    app.run(host='0.0.0.0', port=5000, debug=False)
+    
