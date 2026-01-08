@@ -1,35 +1,32 @@
-<!DOCTYPE html>
+<!DOCTYPE html> 
 <html>
 <head>
-    <title>Arduino LoRa 監測站</title>
-    <meta http-equiv="refresh" content="3"> <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background: #eef2f3; margin: 0; padding: 20px; }
-        .container { background: white; padding: 30px; border-radius: 15px; display: inline-block; box-shadow: 0 10px 20px rgba(0,0,0,0.1); margin-top: 50px; }
-        h1 { color: #2c3e50; margin-bottom: 20px; }
-        .data-box { display: flex; gap: 40px; justify-content: center; }
-        .item { text-align: center; }
-        .label { color: #7f8c8d; font-size: 0.9em; margin-bottom: 5px; }
-        .value { font-size: 2.5em; color: #3498db; font-weight: bold; }
-        .unit { font-size: 0.5em; color: #95a5a6; }
+    <title>LoRa 編號監控系統</title>
+    <meta http-equiv="refresh" content="3">
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; text-align: center; padding: 20px; }
+        .container { max-width: 600px; margin: auto; }
+        .sensor-card { 
+            background: white; border-left: 8px solid #3498db;
+            margin: 15px 0; padding: 20px; border-radius: 8px;
+            display: flex; justify-content: space-between; align-items: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .sid { font-size: 1.2em; color: #7f8c8d; font-weight: bold; }
+        .val { font-size: 2em; color: #2c3e50; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>LoRa 實時監測系統</h1>
-        <div class="data-box">
-            <div class="item">
-                <div class="label">環境溫度</div>
-                <div class="value">{{ data.temp }}<span class="unit">°C</span></div>
-            </div>
-            <div class="item">
-                <div class="label">環境濕度</div>
-                <div class="value">{{ data.hum }}<span class="unit">%</span></div>
-            </div>
+        <h1>LoRa 設備數據列表</h1>
+        {% for sid, val in sensors.items() %}
+        <div class="sensor-card">
+            <div class="sid">設備編號：{{ sid }}</div>
+            <div class="val">{{ val }}</div>
         </div>
-        <p style="color: #bdc3c7; font-size: 0.8em; margin-top: 30px;">
-            最後同步：<span id="timestamp"></span>
-        </p>
+        {% endfor %}
+        <p>最後更新：<span id="ts"></span></p>
     </div>
-    <script>document.getElementById('timestamp').innerHTML = new Date().toLocaleTimeString();</script>
+    <script>document.getElementById('ts').innerHTML = new Date().toLocaleTimeString();</script>
 </body>
 </html>
