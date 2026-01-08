@@ -1,10 +1,10 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html>
 <head>
-    <title>LoRa 編號監控系統</title>
+    <title>LoRa 實時監控</title>
     <meta http-equiv="refresh" content="3">
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; text-align: center; padding: 20px; }
+        body { font-family: 'Microsoft JhengHei', sans-serif; background: #f0f2f5; text-align: center; padding: 20px; }
         .container { max-width: 600px; margin: auto; }
         .sensor-card { 
             background: white; border-left: 8px solid #3498db;
@@ -12,8 +12,8 @@
             display: flex; justify-content: space-between; align-items: center;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
-        .sid { font-size: 1.2em; color: #7f8c8d; font-weight: bold; }
-        .val { font-size: 2em; color: #2c3e50; }
+        .name { font-size: 1.3em; color: #2c3e50; font-weight: bold; }
+        .val { font-size: 2em; color: #3498db; }
     </style>
 </head>
 <body>
@@ -21,7 +21,7 @@
         <h1>LoRa 設備數據列表</h1>
         {% for sid, val in sensors.items() %}
         <div class="sensor-card">
-            <div class="sid">設備編號：{{ sid }}</div>
+            <div class="name">{{ names.get(sid, sid) }}</div>
             <div class="val">{{ val }}</div>
         </div>
         {% endfor %}
