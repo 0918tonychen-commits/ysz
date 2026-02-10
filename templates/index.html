@@ -11,6 +11,7 @@
             --card-bg: rgba(30, 41, 59, 0.7); /* 半透明卡片 */
             --accent-blue: #3b82f6;   /* 亮藍發光色 */
             --accent-green: #10b981;  /* 亮綠發光色 */
+            --accent-red: #ef4444;    /* 離線紅色 */
             --text-main: #f8fafc;
             --text-dim: #94a3b8;
         }
@@ -28,7 +29,6 @@
             overflow: hidden;
         }
 
-        /* 頂部標題 */
         .dashboard-header {
             width: 80%;
             display: flex;
@@ -38,9 +38,14 @@
         }
 
         .title-group { display: flex; align-items: center; gap: 10px; }
-        .status-badge { color: var(--accent-green); font-size: 0.8em; }
+        
+        /* 狀態燈號基礎樣式 */
+        .status-badge { 
+            font-size: 0.8em; 
+            transition: color 0.5s ease;
+            font-weight: bold;
+        }
 
-        /* 卡片容器 */
         .card-container {
             display: flex;
             gap: 30px;
@@ -48,12 +53,11 @@
             max-width: 1000px;
         }
 
-        /* 單個卡片樣式 */
         .card {
             flex: 1;
             background: var(--card-bg);
             border: 1px solid rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px); /* 毛玻璃效果 */
+            backdrop-filter: blur(10px);
             border-radius: 20px;
             padding: 30px;
             position: relative;
@@ -61,8 +65,6 @@
         }
 
         .card:hover { transform: translateY(-5px); }
-
-        /* 發光陰影效果 */
         .card.temp { box-shadow: 0 0 30px rgba(59, 130, 246, 0.15); }
         .card.humi { box-shadow: 0 0 30px rgba(16, 185, 129, 0.15); }
 
@@ -80,7 +82,6 @@
 
         .unit { font-size: 0.4em; margin-left: 5px; opacity: 0.7; }
 
-        /* 底部資訊欄 */
         .footer-info {
             position: fixed;
             bottom: 30px;
@@ -99,7 +100,7 @@
             <span style="font-size: 1.5em;">📡</span>
             <h2 style="margin: 0;">LoRa 設備數據列表</h2>
         </div>
-        <div class="status-badge">● 已連線</div>
+        <div id="connection-status" class="status-badge">○ 檢查連線中...</div>
     </div>
 
     <div class="card-container">
@@ -125,15 +126,30 @@
                 const response = await fetch('/api/data');
                 const data = await response.json();
 
-                // 更新畫面數值
+                // 1. 更新數值
                 document.getElementById('temp-value').innerHTML = `${data.temperature}<span class="unit">°C</span>`;
                 document.getElementById('humidity-value').innerHTML = `${data.humidity}<span class="unit">%</span>`;
                 
-                // 更新最後時間
+                // 2. 更新右上角「真實硬體」燈號狀態
+                const statusBadge = document.getElementById('connection-status');
+                if (data.status === "online") {
+                    statusBadge.innerHTML = "● 設備在線";
+                    statusBadge.style.color = "var(--accent-green)";
+                } else {
+                    statusBadge.innerHTML = "○ 設備離線";
+                    statusBadge.style.color = "var(--accent-red)";
+                }
+
+                // 3. 更新最後更新時間文字
                 const now = new Date();
-                document.getElementById('last-update').innerText = `最後更新：下午 ${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`;
+                document.getElementById('last-update').innerText = `最後讀取伺服器：下午 ${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`;
+                
             } catch (error) {
                 console.error("更新數據失敗:", error);
+                // 若網路斷掉，顯示錯誤
+                const statusBadge = document.getElementById('connection-status');
+                statusBadge.innerHTML = "!! 網路連線錯誤";
+                statusBadge.style.color = "var(--accent-red)";
             }
         }
 
