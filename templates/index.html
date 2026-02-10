@@ -1,32 +1,55 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-Hant">
 <head>
-    <title>LoRa 實時監控</title>
-    <meta http-equiv="refresh" content="3">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LoRa 數據監控</title>
     <style>
-        body { font-family: 'Microsoft JhengHei', sans-serif; background: #f0f2f5; text-align: center; padding: 20px; }
-        .container { max-width: 600px; margin: auto; }
-        .sensor-card { 
-            background: white; border-left: 8px solid #3498db;
-            margin: 15px 0; padding: 20px; border-radius: 8px;
-            display: flex; justify-content: space-between; align-items: center;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        .name { font-size: 1.3em; color: #2c3e50; font-weight: bold; }
-        .val { font-size: 2em; color: #3498db; }
+        /* 這裡可以先放簡單的樣式，確認功能正常後再改成深色儀表板風格 */
+        body { font-family: sans-serif; text-align: center; padding: 50px; background-color: #f4f4f9; }
+        .card-container { display: flex; justify-content: center; gap: 20px; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); min-width: 150px; }
+        .card-value { font-size: 2em; font-weight: bold; color: #007bff; }
+        .card-value span { font-size: 0.5em; color: #666; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>LoRa 設備數據列表</h1>
-        {% for sid, val in sensors.items() %}
-        <div class="sensor-card">
-            <div class="name">{{ names.get(sid, sid) }}</div>
-            <div class="val">{{ val }}</div>
+    <h1>LoRa 設備數據列表</h1>
+    
+    <div class="card-container">
+        <div class="card">
+            <div class="card-header">{{ names['s01'] }}</div>
+            <div class="card-value" id="temp-value">{{ sensors['s01'] }}<span>°C</span></div>
         </div>
-        {% endfor %}
-        <p>最後更新：<span id="ts"></span></p>
+
+        <div class="card">
+            <div class="card-header">{{ names['s02'] }}</div>
+            <div class="card-value" id="humidity-value">{{ sensors['s02'] }}<span>%</span></div>
+        </div>
     </div>
-    <script>document.getElementById('ts').innerHTML = new Date().toLocaleTimeString();</script>
+
+    <script>
+        async function updateDashboard() {
+            try {
+                // 向 Flask 的 /api/data 路徑請求數據
+                const response = await fetch('/api/data');
+                const data = await response.json();
+
+                // 更新畫面上的數值
+                document.getElementById('temp-value').innerHTML = `${data.temperature}<span>°C</span>`;
+                document.getElementById('humidity-value').innerHTML = `${data.humidity}<span>%</span>`;
+                
+                console.log("數據已自動更新:", new Date().toLocaleTimeString());
+            } catch (error) {
+                console.error("更新數據失敗:", error);
+            }
+        }
+
+        // --- 關鍵修改：設定為 2000 毫秒 (2 秒) ---
+        setInterval(updateDashboard, 2000);
+
+        // 頁面載入時立刻執行一次
+        updateDashboard();
+    </script>
 </body>
 </html>
