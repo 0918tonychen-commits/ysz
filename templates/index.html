@@ -3,52 +3,142 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LoRa 數據監控</title>
+    <title>LoRa 數據監控儀表板</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        /* 這裡可以先放簡單的樣式，確認功能正常後再改成深色儀表板風格 */
-        body { font-family: sans-serif; text-align: center; padding: 50px; background-color: #f4f4f9; }
-        .card-container { display: flex; justify-content: center; gap: 20px; }
-        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); min-width: 150px; }
-        .card-value { font-size: 2em; font-weight: bold; color: #007bff; }
-        .card-value span { font-size: 0.5em; color: #666; }
+        :root {
+            --bg-color: #0f172a;      /* 深藍底色 */
+            --card-bg: rgba(30, 41, 59, 0.7); /* 半透明卡片 */
+            --accent-blue: #3b82f6;   /* 亮藍發光色 */
+            --accent-green: #10b981;  /* 亮綠發光色 */
+            --text-main: #f8fafc;
+            --text-dim: #94a3b8;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        /* 頂部標題 */
+        .dashboard-header {
+            width: 80%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 40px;
+        }
+
+        .title-group { display: flex; align-items: center; gap: 10px; }
+        .status-badge { color: var(--accent-green); font-size: 0.8em; }
+
+        /* 卡片容器 */
+        .card-container {
+            display: flex;
+            gap: 30px;
+            width: 90%;
+            max-width: 1000px;
+        }
+
+        /* 單個卡片樣式 */
+        .card {
+            flex: 1;
+            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px); /* 毛玻璃效果 */
+            border-radius: 20px;
+            padding: 30px;
+            position: relative;
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover { transform: translateY(-5px); }
+
+        /* 發光陰影效果 */
+        .card.temp { box-shadow: 0 0 30px rgba(59, 130, 246, 0.15); }
+        .card.humi { box-shadow: 0 0 30px rgba(16, 185, 129, 0.15); }
+
+        .card-label { color: var(--text-dim); font-size: 0.9em; margin-bottom: 15px; }
+        
+        .card-value {
+            font-size: 4em;
+            font-weight: 700;
+            display: flex;
+            align-items: baseline;
+        }
+
+        .card.temp .card-value { color: var(--accent-blue); }
+        .card.humi .card-value { color: var(--accent-green); }
+
+        .unit { font-size: 0.4em; margin-left: 5px; opacity: 0.7; }
+
+        /* 底部資訊欄 */
+        .footer-info {
+            position: fixed;
+            bottom: 30px;
+            width: 80%;
+            display: flex;
+            justify-content: space-between;
+            color: var(--text-dim);
+            font-size: 0.8em;
+        }
     </style>
 </head>
 <body>
-    <h1>LoRa 設備數據列表</h1>
-    
+
+    <div class="dashboard-header">
+        <div class="title-group">
+            <span style="font-size: 1.5em;">📡</span>
+            <h2 style="margin: 0;">LoRa 設備數據列表</h2>
+        </div>
+        <div class="status-badge">● 已連線</div>
+    </div>
+
     <div class="card-container">
-        <div class="card">
-            <div class="card-header">{{ names['s01'] }}</div>
-            <div class="card-value" id="temp-value">{{ sensors['s01'] }}<span>°C</span></div>
+        <div class="card temp">
+            <div class="card-label">🌡️ {{ names['s01'] }}</div>
+            <div class="card-value" id="temp-value">--<span class="unit">°C</span></div>
         </div>
 
-        <div class="card">
-            <div class="card-header">{{ names['s02'] }}</div>
-            <div class="card-value" id="humidity-value">{{ sensors['s02'] }}<span>%</span></div>
+        <div class="card humi">
+            <div class="card-label">💧 {{ names['s02'] }}</div>
+            <div class="card-value" id="humidity-value">--<span class="unit">%</span></div>
         </div>
+    </div>
+
+    <div class="footer-info">
+        <div id="last-update">最後更新：等待中...</div>
+        <div>● 自動更新中</div>
     </div>
 
     <script>
         async function updateDashboard() {
             try {
-                // 向 Flask 的 /api/data 路徑請求數據
                 const response = await fetch('/api/data');
                 const data = await response.json();
 
-                // 更新畫面上的數值
-                document.getElementById('temp-value').innerHTML = `${data.temperature}<span>°C</span>`;
-                document.getElementById('humidity-value').innerHTML = `${data.humidity}<span>%</span>`;
+                // 更新畫面數值
+                document.getElementById('temp-value').innerHTML = `${data.temperature}<span class="unit">°C</span>`;
+                document.getElementById('humidity-value').innerHTML = `${data.humidity}<span class="unit">%</span>`;
                 
-                console.log("數據已自動更新:", new Date().toLocaleTimeString());
+                // 更新最後時間
+                const now = new Date();
+                document.getElementById('last-update').innerText = `最後更新：下午 ${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`;
             } catch (error) {
                 console.error("更新數據失敗:", error);
             }
         }
 
-        // --- 關鍵修改：設定為 2000 毫秒 (2 秒) ---
+        // 每兩秒自動刷新一次
         setInterval(updateDashboard, 2000);
-
-        // 頁面載入時立刻執行一次
         updateDashboard();
     </script>
 </body>
