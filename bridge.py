@@ -23,23 +23,32 @@ while True:
             if line:
                 print(f"無線接收數據: {line}")
                 
-                # 確保收到的是「數字,數字」格式
+                # 確保收到的是「溫度,濕度」格式
                 values = line.split(",")
                 
                 if len(values) >= 2:
-                    # 嘗試將字串轉為數字，確認不是亂碼
-                    temp = values[0]
-                    hum = values[1]
+                    try:
+                        # --- 核心改進：確認數據是否為有效數字 ---
+                        # 先轉成 float 再轉回字串，可以過濾掉非數字的亂碼
+                        temp = str(float(values[0]))
+                        hum = str(float(values[1]))
+                        
+                        # 同步到雲端
+                        # 我們維持你原本的格式，讓網頁顯示 "XX.X °C"
+                        requests.post(RENDER_URL, json={"id": "s01", "val": temp + " °C"})
+                        requests.post(RENDER_URL, json={"id": "s02", "val": hum + " %"})
+                        
+                        print(f">>> 已同步雲端 - 溫度: {temp}, 濕度: {hum}")
                     
-                    # 同步到雲端
-                    requests.post(RENDER_URL, json={"id": "s01", "val": temp + " °C"})
-                    requests.post(RENDER_URL, json={"id": "s02", "val": hum + " %"})
-                    
-                    print(f">>> 已同步雲端 - 溫度: {temp}, 濕度: {hum}")
+                    except ValueError:
+                        # 如果 values[0] 或 values[1] 不是數字，會跳到這裡
+                        print(f"收到無效數據內容 (可能是無線干擾): {line}")
                 else:
-                    print("數據格式不全，略過...")
+                    print(f"數據格式不全 (收到: {line})，略過...")
                     
         except Exception as e:
-            print(f"解析過程出錯 (可能是干擾): {e}")
+            print(f"解析過程出錯: {e}")
     
-    time.sleep(0.5) # 稍微縮短等待時間，反應更快
+    # --- 反應速度優化 ---
+    # 將等待時間改為 0.1 秒，讓程式能更快捕捉到序列埠的數據
+    time.sleep(0.1)
