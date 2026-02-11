@@ -3,7 +3,7 @@ import requests
 import time
 
 # --- 設定區 ---
-COM_PORT = 'COM10'  # 請確認您的接收板在哪個 COM 埠
+COM_PORT = 'COM4'  # 根據你的截圖，目前是 COM4
 BAUD_RATE = 9600
 RENDER_URL = "https://ysz.onrender.com/update"
 
@@ -36,8 +36,8 @@ while True:
                 hum = parts[1].split(":")[-1].strip()
                 
                 # 3. 同步到 Render 雲端
-                requests.post(RENDER_URL, json={"id": "s01", "val": temp + " °C"})
-                requests.post(RENDER_URL, json={"id": "s02", "val": hum + " %"})
+                requests.post(RENDER_URL, json={"id": "s01", "val": temp })
+                requests.post(RENDER_URL, json={"id": "s02", "val": hum })
                 
                 print(f">>> 網頁已更新 - 溫度: {temp}, 濕度: {hum}")
             
