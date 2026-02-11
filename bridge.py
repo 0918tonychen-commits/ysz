@@ -3,7 +3,7 @@ import requests
 import time
 
 # --- 設定區 ---
-COM_PORT = 'COM10'  # 請確認您的接收板在哪個 COM 埠
+COM_PORT = 'COM4'  # 請確認您的接收板在哪個 COM 埠
 BAUD_RATE = 9600
 RENDER_URL = "https://ysz.onrender.com/update"
 
