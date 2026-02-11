@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 import time
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 # 1. 建立編號對應表
 NAME_MAP = {
@@ -77,6 +77,6 @@ def update():
         return {"status": "success"}, 200
     return {"status": "error"}, 400
 
-if _name_ == '_main_':
+if __name__ == '__main__':
     # Render 環境通常使用 10000 埠口 
     app.run(host='0.0.0.0', port=10000)
