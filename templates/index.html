@@ -3,30 +3,77 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LoRa 實時監測站</title>
+    <title>LoRa 實時監測站 | 科技版</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { font-family: sans-serif; text-align: center; background: #f4f4f9; padding: 20px; }
-        .container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 10px; shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; }
-        .online { background-color: #4caf50; }
-        .offline { background-color: #f44336; }
-        .chart-box { margin-top: 30px; }
+        /* 科技感深色背景 */
+        body { 
+            font-family: 'Segoe UI', Roboto, sans-serif; 
+            background: #0b0e14; 
+            color: #e0e6ed; 
+            margin: 0; 
+            padding: 20px;
+        }
+
+        .container { 
+            max-width: 900px; 
+            margin: auto; 
+            background: rgba(20, 26, 35, 0.95); 
+            padding: 30px; 
+            border-radius: 15px; 
+            border: 1px solid #1f2937;
+            box-shadow: 0 0 25px rgba(0, 168, 255, 0.1);
+        }
+
+        h1 { color: #00d2ff; text-shadow: 0 0 10px rgba(0, 210, 255, 0.5); }
+
+        /* 狀態燈 */
+        .status-box { font-size: 0.9em; margin-bottom: 25px; color: #94a3b8; }
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .online { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
+        .offline { background: #ff4757; box-shadow: 0 0 10px #ff4757; }
+
+        /* 數據卡片 */
+        .card-container { display: flex; gap: 20px; justify-content: center; margin-bottom: 30px; }
+        .card {
+            background: #1a222c;
+            border: 1px solid #2d3748;
+            border-radius: 12px;
+            padding: 20px;
+            width: 45%;
+            transition: transform 0.2s;
+        }
+        .card:hover { transform: translateY(-5px); border-color: #00d2ff; }
+        .card h3 { color: #94a3b8; font-size: 1rem; margin: 0; }
+        .card h2 { font-size: 2.5rem; margin: 10px 0; font-family: 'Courier New', monospace; }
+        
+        #temp-val { color: #ff6384; text-shadow: 0 0 15px rgba(255, 99, 132, 0.3); }
+        #hum-val { color: #36a2eb; text-shadow: 0 0 15px rgba(54, 162, 235, 0.3); }
+
+        .chart-box { 
+            background: #111827; 
+            padding: 15px; 
+            border-radius: 10px; 
+            border: 1px solid #1f2937; 
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>LoRa 環境監測站</h1>
-        <p>狀態: <span id="status-text">檢查中...</span> <span id="status-dot" class="status-dot"></span></p>
+        <h1>LoRa 無線數據儀表板</h1>
+        <div class="status-box">
+            設備狀態: <span id="status-dot" class="status-dot offline"></span>
+            <span id="status-text">OFFLINE</span>
+        </div>
         
-        <div style="display: flex; justify-content: space-around;">
-            <div>
-                <h3>溫度</h3>
-                <h2 id="temp-val">-- °C</h2>
+        <div class="card-container">
+            <div class="card">
+                <h3>🌡️ 環境溫度</h3>
+                <h2 id="temp-val">--<span style="font-size: 1rem;">°C</span></h2>
             </div>
-            <div>
-                <h3>濕度</h3>
-                <h2 id="hum-val">-- %</h2>
+            <div class="card">
+                <h3>💧 環境濕度</h3>
+                <h2 id="hum-val">--<span style="font-size: 1rem;">%</span></h2>
             </div>
         </div>
 
@@ -36,6 +83,10 @@
     </div>
 
     <script>
+        // 設定 Chart.js 預設顏色
+        Chart.defaults.color = '#94a3b8';
+        Chart.defaults.borderColor = '#1f2937';
+
         const ctx = document.getElementById('myChart').getContext('2d');
         const myChart = new Chart(ctx, {
             type: 'line',
@@ -46,22 +97,25 @@
                         label: '溫度 (°C)',
                         data: [],
                         borderColor: '#ff6384',
-                        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                        fill: true,
                         yAxisID: 'y',
-                        tension: 0.3
+                        tension: 0.4
                     },
                     {
                         label: '濕度 (%)',
                         data: [],
                         borderColor: '#36a2eb',
-                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                        fill: true,
                         yAxisID: 'y1',
-                        tension: 0.3
+                        tension: 0.4
                     }
                 ]
             },
             options: {
                 responsive: true,
+                plugins: { legend: { position: 'bottom' } },
                 scales: {
                     y: { type: 'linear', position: 'left', title: { display: true, text: '溫度' } },
                     y1: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '濕度' } }
@@ -73,26 +127,26 @@
             fetch('/api/data')
                 .then(res => res.json())
                 .then(data => {
-                    // 更新數字
-                    document.getElementById('temp-val').innerText = data.temperature;
-                    document.getElementById('hum-val').innerText = data.humidity;
+                    // 更新數值 (如果 bridge.py 已經把單位弄掉，這裡顯示會很乾淨)
+                    document.getElementById('temp-val').innerHTML = `${data.temperature}<span style="font-size:1rem">°C</span>`;
+                    document.getElementById('hum-val').innerHTML = `${data.humidity}<span style="font-size:1rem">%</span>`;
                     
-                    // 更新狀態燈
+                    // 更新狀態
                     const dot = document.getElementById('status-dot');
                     const text = document.getElementById('status-text');
                     text.innerText = data.status.toUpperCase();
-                    dot.className = 'status-dot ' + data.status;
+                    dot.className = 'status-dot ' + (data.status === 'online' ? 'online' : 'offline');
 
                     // 更新圖表
                     myChart.data.labels = data.history.labels;
                     myChart.data.datasets[0].data = data.history.temp;
                     myChart.data.datasets[1].data = data.history.hum;
-                    myChart.update('none'); // 靜默更新不觸發動畫，效能較好
-                });
+                    myChart.update('none');
+                })
+                .catch(err => console.error("抓取失敗:", err));
         }
 
-        // 每 3 秒抓一次數據
-        setInterval(fetchData, 3000);
+        setInterval(fetchData, 3000); // 每 3 秒更新
         fetchData();
     </script>
 </body>
