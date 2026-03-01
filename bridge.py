@@ -2,35 +2,54 @@ import serial
 import requests
 import time
 
-COM_PORT = 'COM4' # 請確認您的接收端 COM 埠
+# --- 設定區 ---
+COM_PORT = 'COM3'  # 請確認這是您「接收端」的 COM 埠
 RENDER_URL = "https://ysz.onrender.com/update"
-last_update = {} # 紀錄各 ID 上次更新時間，防止暴衝
+last_update = {}   # 紀錄各 ID 上次更新時間
 
-ser = serial.Serial(COM_PORT, 9600, timeout=1)
+try:
+    ser = serial.Serial(COM_PORT, 9600, timeout=1)
+    print(f"✅ 成功連線至接收端 {COM_PORT}")
+except Exception as e:
+    print(f"❌ 無法開啟序列埠: {e}")
+    exit()
 
 while True:
     if ser.in_waiting > 0:
         try:
+            # 讀取數據並清理
             line = ser.readline().decode('utf-8', errors='ignore').strip()
-            
-            # 格式檢查: S01,25.5,64.0
-            if "S0" in line and "," in line:
-                parts = line.replace("內容: ", "").split(",")
-                if len(parts) >= 3:
-                    node_id = parts[0].lower() # 轉成 s01
-                    temp = parts[1]
-                    hum = parts[2]
+            if not line:
+                continue
 
-                    # 防暴衝：同一節點 3 秒內只准上傳一次
+            print(f"📡 收到原始數據: {line}")
+
+            # 解析邏輯：預期格式為 s01_t,26.5,h,55.0
+            if "s0" in line.lower() and "," in line:
+                parts = line.split(",")
+                
+                # 確保封包完整性 (至少要有 ID, 溫值, h標籤, 濕值)
+                if len(parts) >= 4:
+                    node_id_base = parts[0].split('_')[0] # 抓取 s01
+                    temp = parts[1]
+                    hum = parts[3]
+
                     now = time.time()
-                    if node_id in last_update and (now - last_update[node_id] < 3):
+                    # 防暴衝檢查
+                    if node_id_base in last_update and (now - last_update[node_id_base] < 3):
                         continue
 
                     # 轉發至雲端：分別傳送溫度(_t)與濕度(_h)
-                    requests.post(RENDER_URL, json={"id": f"{node_id}_t", "val": temp})
-                    requests.post(RENDER_URL, json={"id": f"{node_id}_h", "val": hum})
+                    t_payload = {"id": f"{node_id_base}_t", "val": temp}
+                    h_payload = {"id": f"{node_id_base}_h", "val": hum}
                     
-                    last_update[node_id] = now
-                    print(f"成功轉發 {node_id} 數據: {temp}, {hum}")
+                    requests.post(RENDER_URL, json=t_payload)
+                    requests.post(RENDER_URL, json=h_payload)
+                    
+                    last_update[node_id_base] = now
+                    print(f"🚀 成功轉發 {node_id_base}：溫 {temp} / 濕 {hum}")
+
         except Exception as e:
-            print(f"解析錯誤: {e}")
+            print(f"⚠️ 解析錯誤: {e}")
+            
+    time.sleep(0.1) # 稍微減輕 CPU 負擔
