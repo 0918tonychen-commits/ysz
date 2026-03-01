@@ -2,51 +2,35 @@ import serial
 import requests
 import time
 
-# --- 設定區 ---
-COM_PORT = 'COM4'  # 根據你的截圖，目前是 COM4
-BAUD_RATE = 9600
+COM_PORT = 'COM4' # 請確認您的接收端 COM 埠
 RENDER_URL = "https://ysz.onrender.com/update"
+last_update = {} # 紀錄各 ID 上次更新時間，防止暴衝
 
-try:
-    ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
-    print(f"成功連接 {COM_PORT}，LoRa 電腦轉發站啟動中...")
-except Exception as e:
-    print(f"錯誤: 無法開啟序列埠 {e}")
-    exit()
+ser = serial.Serial(COM_PORT, 9600, timeout=1)
 
 while True:
     if ser.in_waiting > 0:
         try:
-            # 讀取接收端板子印出的內容
             line = ser.readline().decode('utf-8', errors='ignore').strip()
             
-            # 1. 處理包含溫濕度數據的行
-            if "T:" in line and "H:" in line:
-                # --- 關鍵修正：先移除「內容: 」這幾個字，避免解析錯誤 ---
-                clean_line = line.replace("內容: ", "")
-                print(f"收到有效數據行: {clean_line}")
-                
-                # 2. 解析標籤格式 (範例: T:21.3,H:63.9,Count:327)
-                parts = clean_line.split(",")
-                
-                # 擷取 T: 之後的數字
-                # 使用 split(":")[-1] 確保只抓到冒號後面的數值
-                temp = parts[0].split(":")[-1].strip()
-                # 擷取 H: 之後的數字
-                hum = parts[1].split(":")[-1].strip()
-                
-                # 3. 同步到 Render 雲端
-                requests.post(RENDER_URL, json={"id": "s01", "val": temp })
-                requests.post(RENDER_URL, json={"id": "s02", "val": hum })
-                
-                print(f">>> 網頁已更新 - 溫度: {temp}, 濕度: {hum}")
-            
-            # 處理訊號品質訊息
-            elif "RSSI" in line:
-                print(f"訊號品質檢查: {line}")
+            # 格式檢查: S01,25.5,64.0
+            if "S0" in line and "," in line:
+                parts = line.replace("內容: ", "").split(",")
+                if len(parts) >= 3:
+                    node_id = parts[0].lower() # 轉成 s01
+                    temp = parts[1]
+                    hum = parts[2]
 
+                    # 防暴衝：同一節點 3 秒內只准上傳一次
+                    now = time.time()
+                    if node_id in last_update and (now - last_update[node_id] < 3):
+                        continue
+
+                    # 轉發至雲端：分別傳送溫度(_t)與濕度(_h)
+                    requests.post(RENDER_URL, json={"id": f"{node_id}_t", "val": temp})
+                    requests.post(RENDER_URL, json={"id": f"{node_id}_h", "val": hum})
+                    
+                    last_update[node_id] = now
+                    print(f"成功轉發 {node_id} 數據: {temp}, {hum}")
         except Exception as e:
-            print(f"解析過程出錯: {e}")
-    
-    # 維持高頻率檢查，反應速度最快
-    time.sleep(0.1)
+            print(f"解析錯誤: {e}")
