@@ -3,68 +3,117 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LoRa SCADA 數據監控中心</title>
+    <title>LoRa SCADA 智能監控中心</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
+        /* --- 基礎背景與數位網格 --- */
         body { 
             font-family: 'Segoe UI', system-ui, sans-serif; 
-            background: #0b1016; 
+            background: radial-gradient(circle at center, #1a222c 0%, #0b1016 100%); 
             color: #e2e8f0; 
             margin: 0; padding: 20px;
             display: flex; justify-content: center;
+            min-height: 100vh;
         }
 
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-image: 
+                linear-gradient(rgba(0, 210, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 210, 255, 0.03) 1px, transparent 1px);
+            background-size: 30px 30px;
+            z-index: -1;
+        }
+
+        /* --- 玻璃擬態容器 --- */
         .container { 
-            width: 100%; max-width: 900px; 
-            background: #141a23; padding: 30px; 
-            border-radius: 24px; border: 1px solid #2d3748;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            width: 100%; max-width: 950px; 
+            background: rgba(20, 26, 35, 0.85); 
+            padding: 30px; 
+            border-radius: 28px; 
+            border: 1px solid rgba(0, 210, 255, 0.2);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 20px 50px rgba(0,0,0,0.6);
         }
 
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        h1 { color: #00d2ff; font-size: 1.6rem; margin: 0; text-shadow: 0 0 10px rgba(0,210,255,0.3); }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+        h1 { 
+            color: #00d2ff; font-size: 1.8rem; margin: 0; 
+            text-shadow: 0 0 15px rgba(0,210,255,0.5);
+            letter-spacing: 1px;
+        }
 
-        .status-tag { font-size: 0.8rem; color: #94a3b8; display: flex; align-items: center; }
-        .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
-        .online { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
+        /* --- 狀態燈呼吸動畫 --- */
+        .status-tag { font-size: 0.85rem; color: #94a3b8; display: flex; align-items: center; }
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 10px; }
+        .online { 
+            background: #00ff88; 
+            box-shadow: 0 0 12px #00ff88;
+            animation: pulse-green 2s infinite; 
+        }
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(0, 255, 136, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
+        }
         .offline { background: #ff4757; box-shadow: 0 0 10px #ff4757; }
 
-        /* --- SCADA 網格配置 --- */
+        /* --- SCADA 網格卡片優化 --- */
         .scada-grid { 
             display: grid; 
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); 
-            gap: 20px; margin-top: 20px; 
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); 
+            gap: 20px; margin-top: 10px; 
         }
 
         .card {
-            background: #1a222c; border: 2px solid #2d3748;
-            border-radius: 18px; padding: 20px;
-            cursor: pointer; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: linear-gradient(145deg, #1e293b, #111827);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 20px; padding: 22px;
+            cursor: pointer; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            position: relative; overflow: hidden;
         }
         
-        .card:hover { border-color: #00d2ff; background: #1f2937; transform: translateY(-5px); }
-        .card.active { border-color: #00d2ff; background: #1f2937; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
+        /* 懸停發光效果 */
+        .card:hover { 
+            border-color: rgba(0, 210, 255, 0.5);
+            background: #1f2937; transform: translateY(-8px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.4);
+        }
+        .card.active { 
+            border-color: #00d2ff; 
+            background: rgba(0, 210, 255, 0.05);
+            box-shadow: 0 0 25px rgba(0, 210, 255, 0.3), inset 0 0 10px rgba(0, 210, 255, 0.1); 
+        }
 
-        .card h3 { color: #94a3b8; font-size: 0.85rem; margin: 0; text-transform: uppercase; letter-spacing: 1px; }
-        .card .val-row { display: flex; justify-content: space-around; align-items: baseline; margin-top: 10px; }
-        .card h2 { font-size: 1.8rem; margin: 0; font-family: 'Consolas', monospace; }
+        .card h3 { color: #94a3b8; font-size: 0.9rem; margin: 0; opacity: 0.8; }
+        .card .val-row { display: flex; justify-content: space-around; align-items: baseline; margin-top: 15px; }
+        
+        /* 數值霓虹感字體 */
+        .card h2 { 
+            font-size: 2.2rem; margin: 0; font-family: 'Consolas', 'Courier New', monospace; 
+            filter: drop-shadow(0 0 8px currentColor);
+        }
         
         .temp-color { color: #ff6384; }
         .hum-color { color: #36a2eb; }
 
+        /* --- 圖表區域 --- */
         .chart-wrapper {
             max-height: 0; overflow: hidden;
-            transition: all 0.5s ease-in-out; opacity: 0;
-            background: #0f172a; border-radius: 15px; margin-top: 0;
+            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0;
+            background: rgba(15, 23, 42, 0.9); border-radius: 20px; margin-top: 0;
         }
 
         .chart-wrapper.show {
-            max-height: 450px; opacity: 1;
-            padding: 25px; margin-top: 25px; border: 1px solid #1f2937;
+            max-height: 480px; opacity: 1;
+            padding: 30px; margin-top: 25px; 
+            border: 1px solid rgba(0, 210, 255, 0.2);
         }
 
-        canvas { width: 100% !important; height: 320px !important; }
-        .hint { color: #475569; font-size: 0.8rem; text-align: center; margin-top: 15px; }
+        canvas { width: 100% !important; height: 340px !important; }
+        .hint { color: #475569; font-size: 0.85rem; text-align: center; margin-top: 20px; letter-spacing: 0.5px; }
     </style>
 </head>
 <body>
@@ -73,7 +122,7 @@
             <h1>LoRa SCADA 監控系統</h1>
             <div class="status-tag">
                 <span id="status-dot" class="status-dot offline"></span>
-                <span id="status-text">OFFLINE</span>
+                <span id="status-text">SYSTEM OFFLINE</span>
             </div>
         </div>
         
@@ -83,17 +132,17 @@
             <canvas id="myChart"></canvas>
         </div>
 
-        <p class="hint">💡 點擊監測點卡片可切換查看歷史數據圖表</p>
+        <p class="hint">⚡ 點擊設備卡片可即時切換分析趨勢圖</p>
     </div>
 
     <script>
-        // --- 1. SCADA 型號與單位對照表 ---
+        // --- 1. 配置與初始化 ---
         const sensorConfig = {
-            "s01": { name: "1號感測器", icon: "🏢" },
-            "s02": { name: "2號感測器", icon: "🧪" },
-            "s03": { name: "3號感測器", icon: "🖥️" },
-            "s04": { name: "4號感測器", icon: "🌿" },
-            "s05": { name: "5號感測器", icon: "⚡" }
+            "s01": { name: "1號監測點", icon: "🏢" },
+            "s02": { name: "2號監測點", icon: "🧪" },
+            "s03": { name: "3號監測點", icon: "🖥️" },
+            "s04": { name: "4號監測點", icon: "🌿" },
+            "s05": { name: "5號監測點", icon: "⚡" }
         };
 
         let currentActiveNode = null;
@@ -104,16 +153,20 @@
         const myChart = new Chart(ctx, {
             type: 'line',
             data: { labels: [], datasets: [
-                { label: '溫度', data: [], borderColor: '#ff6384', backgroundColor: 'rgba(255, 99, 132, 0.1)', fill: true, tension: 0.4 },
-                { label: '濕度', data: [], borderColor: '#36a2eb', backgroundColor: 'rgba(54, 162, 235, 0.1)', fill: true, tension: 0.4 }
+                { label: '溫度 (°C)', data: [], borderColor: '#ff6384', backgroundColor: 'rgba(255, 99, 132, 0.1)', fill: true, tension: 0.4, borderWidth: 3, pointRadius: 2 },
+                { label: '濕度 (%)', data: [], borderColor: '#36a2eb', backgroundColor: 'rgba(54, 162, 235, 0.1)', fill: true, tension: 0.4, borderWidth: 3, pointRadius: 2 }
             ]},
             options: { 
                 responsive: true, maintainAspectRatio: false,
-                scales: { y: { grid: { color: 'rgba(255,255,255,0.05)' } } }
+                scales: { 
+                    y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { font: { size: 10 } } },
+                    x: { grid: { display: false }, ticks: { font: { size: 10 } } }
+                },
+                plugins: { legend: { labels: { boxWidth: 12, font: { size: 12 } } } }
             }
         });
 
-        // --- 2. 動態卡片生成器 ---
+        // --- 2. 功能邏輯 ---
         function createCards() {
             const grid = document.getElementById('scada-grid');
             Object.keys(sensorConfig).forEach(id => {
@@ -122,8 +175,8 @@
                     <div class="card" id="card-${id}" onclick="toggleChart('${id}')">
                         <h3>${conf.icon} ${conf.name}</h3>
                         <div class="val-row">
-                            <h2 class="temp-color"><span id="${id}-t">--</span><small>°C</small></h2>
-                            <h2 class="hum-color"><span id="${id}-h">--</span><small>%</small></h2>
+                            <h2 class="temp-color"><span id="${id}-t">--</span><small style="font-size:0.9rem">°C</small></h2>
+                            <h2 class="hum-color"><span id="${id}-h">--</span><small style="font-size:0.9rem">%</small></h2>
                         </div>
                     </div>`;
                 grid.insertAdjacentHTML('beforeend', card);
@@ -131,33 +184,39 @@
         }
 
         function toggleChart(nodeId) {
+            const cards = document.querySelectorAll('.card');
             if (currentActiveNode === nodeId) {
                 currentActiveNode = null;
                 chartWrapper.classList.remove('show');
+                cards.forEach(c => c.classList.remove('active'));
             } else {
                 currentActiveNode = nodeId;
                 chartWrapper.classList.add('show');
-                // 清除其他卡片的亮起狀態
-                document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+                cards.forEach(c => c.classList.remove('active'));
                 document.getElementById(`card-${nodeId}`).classList.add('active');
-                setTimeout(() => myChart.resize(), 350);
+                setTimeout(() => myChart.resize(), 400);
             }
         }
 
         function fetchData() {
-            fetch('/api/all_data') // 配合 SCADA 一對多後端路徑
+            fetch('/api/all_data')
                 .then(res => res.json())
                 .then(data => {
-                    // 更新各卡片數值
+                    // 更新各節點數據
                     Object.keys(sensorConfig).forEach(id => {
-                        if(data[`${id}_t`]) document.getElementById(`${id}-t`).innerText = data[`${id}_t`].val;
-                        if(data[`${id}_h`]) document.getElementById(`${id}-h`).innerText = data[`${id}_h`].val;
+                        const tElem = document.getElementById(`${id}-t`);
+                        const hElem = document.getElementById(`${id}-h`);
+                        if(data[`${id}_t`]) tElem.innerText = data[`${id}_t`].val;
+                        if(data[`${id}_h`]) hElem.innerText = data[`${id}_h`].val;
                     });
 
-                    // 狀態燈與圖表更新
-                    document.getElementById('status-text').innerText = data.status || "OFFLINE";
-                    document.getElementById('status-dot').className = 'status-dot ' + (data.status === 'online' ? 'online' : 'offline');
+                    // 更新系統狀態
+                    const statusText = document.getElementById('status-text');
+                    const statusDot = document.getElementById('status-dot');
+                    statusText.innerText = data.status === 'online' ? 'SYSTEM ONLINE' : 'SYSTEM OFFLINE';
+                    statusDot.className = 'status-dot ' + (data.status === 'online' ? 'online' : 'offline');
 
+                    // 更新歷史圖表
                     if (currentActiveNode && data.history && data.history[currentActiveNode]) {
                         const h = data.history[currentActiveNode];
                         myChart.data.labels = h.labels;
@@ -165,10 +224,11 @@
                         myChart.data.datasets[1].data = h.hum;
                         myChart.update('none');
                     }
-                });
+                })
+                .catch(err => console.error("Data fetch error:", err));
         }
 
-        createCards(); // 初始化生成五張卡片
+        createCards();
         setInterval(fetchData, 3000);
         fetchData();
     </script>
