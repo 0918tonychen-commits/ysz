@@ -16,8 +16,12 @@ def index():
 def get_all_data():
     now = time.time()
     system_status = "offline"
+    
+    # --- 關鍵修改 1：放寬離線判定門檻 ---
+    # 因為發送端 10 秒傳一次，加上傳輸延遲，建議門檻設為 30~40 秒
+    # 若未來改為 5 分鐘傳一次，這裡請改為 360 秒
     for ts in last_seen_map.values():
-        if now - ts < 20:
+        if now - ts < 40: 
             system_status = "online"
             break
     
@@ -36,20 +40,23 @@ def update():
         raw_id = data["id"].lower() 
         val_str = str(data.get("val", "0"))
         
-        # --- 核心修改 1：強制控制數值精度 ---
+        # --- 核心邏輯：數值精度控制 ---
         try:
-            # 清理字串並轉換為浮點數，四捨五入到第 1 位
             raw_num = float(val_str.replace("°C", "").replace("%", "").strip())
-            num_val = round(raw_num, 1) # 強制控制小數點
+            num_val = round(raw_num, 1) 
         except (ValueError, TypeError):
             num_val = 0.0
 
-        # 更新即時數據 (使用精簡後的數字)
+        # 更新即時數據
         all_sensors[raw_id] = {"val": str(num_val)}
         
         # 解析節點資訊
-        node_id = raw_id.split("_")[0]
-        data_type = raw_id.split("_")[1] if "_" in raw_id else "t"
+        # 預期 ID 格式如: s01_t 或 s01_h
+        parts = raw_id.split("_")
+        node_id = parts[0]
+        data_type = parts[1] if len(parts) > 1 else "t"
+        
+        # 更新最後看到該節點的時間
         last_seen_map[node_id] = time.time() 
 
         # 動態建立歷史空間
@@ -59,14 +66,14 @@ def update():
         node_hist = history_data[node_id]
         current_time = time.strftime("%H:%M:%S")
 
-        # --- 核心修改 2：存入精簡數值並限制 100 筆 ---
+        # --- 數據存入歷史紀錄 (限制 100 筆) ---
         if data_type == "t": # 溫度
             node_hist["temp"].append(num_val)
             node_hist["labels"].append(current_time)
         elif data_type == "h": # 濕度
             node_hist["hum"].append(num_val)
 
-        # 限制長度
+        # 限制長度，防止記憶體溢出
         if len(node_hist["temp"]) > 100:
             node_hist["temp"].pop(0)
             node_hist["labels"].pop(0)
@@ -78,4 +85,5 @@ def update():
     return {"status": "error"}, 400
 
 if __name__ == '__main__':
+    # 這裡 port 10000 是為了配合 Render 部署
     app.run(host='0.0.0.0', port=10000)
