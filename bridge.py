@@ -3,12 +3,11 @@ import requests
 import time
 
 # --- 1. 設定區 ---
-COM_PORT = 'COM3'  # 務必確認這是「接收端」的正確 COM 埠
+COM_PORT = 'COM3'  
 BAUD_RATE = 9600
 RENDER_URL = "https://ysz.onrender.com/update"
-last_update = {}   # 紀錄各 ID 上次更新時間，防止數據過於頻繁
+last_update = {}   
 
-# --- 2. 啟動序列埠 ---
 try:
     ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
     print(f"✅ 成功連線至接收端 {COM_PORT}")
@@ -24,23 +23,29 @@ while True:
 
             print(f"📡 收到原始數據: {line}")
 
-            # --- 關鍵修正：只抓取「數據: 」之後的內容 ---
             if "數據:" in line:
-                clean_data = line.split("數據:")[1].strip().lower() # 取得 s02_t,21.5,h,80.3
+                # 這裡會取得 s01_t,22.3,h,78.1,req_time (假設發送端有加 req_time)
+                clean_data = line.split("數據:")[1].strip().lower() 
                 parts = clean_data.split(",")
                 
-                # 確保格式正確 (ID, 溫, h標籤, 濕)
                 if len(parts) >= 4:
-                    node_id_base = parts[0].split('_')[0] # 抓取 s01 或 s02
+                    node_id_base = parts[0].split('_')[0]
                     temp = parts[1]
                     hum = parts[3]
 
+                    # --- 核心修改：處理校時請求 ---
+                    if "req_time" in clean_data:
+                        # 格式化當前電腦時間，例如 "TIME:14:30:05"
+                        current_time_str = time.strftime("TIME:%H:%M:%S")
+                        # 透過序列埠傳回給 Arduino 接收端
+                        ser.write((current_time_str + "\n").encode()) 
+                        print(f"⏰ 已發送校時訊號: {current_time_str}")
+
                     now = time.time()
-                    # 防暴衝 (3秒內不重複傳送同一節點)
                     if node_id_base in last_update and (now - last_update[node_id_base] < 3):
                         continue
 
-                    # 轉發至雲端
+                    # 轉發至雲端邏輯維持不變
                     t_payload = {"id": f"{node_id_base}_t", "val": temp}
                     h_payload = {"id": f"{node_id_base}_h", "val": hum}
                     
@@ -62,4 +67,4 @@ while True:
         except Exception as e:
             print(f"⚠️ 解析錯誤: {e}")
             
-    time.sleep(0.1) # 降低 CPU 使用率
+    time.sleep(0.1)
