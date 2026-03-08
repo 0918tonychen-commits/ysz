@@ -19,48 +19,45 @@ except Exception as e:
 while True:
     if ser.in_waiting > 0:
         try:
-            # 讀取並清理字串
             line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if not line:
-                continue
+            if not line: continue
 
             print(f"📡 收到原始數據: {line}")
 
-            # 統一格式處理：將冒號轉為逗號，並轉小寫
-            clean_line = line.replace(":", ",").lower()
-            
-            # 解析邏輯：預期格式如 s01_t,26.5,h,55.0 或 s02_t,21.6,h:79.9
-            if "s0" in clean_line and "," in clean_line:
-                parts = clean_line.split(",")
+            # --- 關鍵修正：只抓取「數據: 」之後的內容 ---
+            if "數據:" in line:
+                clean_data = line.split("數據:")[1].strip().lower() # 取得 s02_t,21.5,h,80.3
+                parts = clean_data.split(",")
                 
-                # 確保封包長度足夠 (ID, 溫, 標籤, 濕)
+                # 確保格式正確 (ID, 溫, h標籤, 濕)
                 if len(parts) >= 4:
                     node_id_base = parts[0].split('_')[0] # 抓取 s01 或 s02
                     temp = parts[1]
                     hum = parts[3]
 
-                    # 防暴衝：同一節點 3 秒內只准上傳一次
                     now = time.time()
+                    # 防暴衝 (3秒內不重複傳送同一節點)
                     if node_id_base in last_update and (now - last_update[node_id_base] < 3):
                         continue
 
-                    # 3. 轉發至雲端
+                    # 轉發至雲端
                     t_payload = {"id": f"{node_id_base}_t", "val": temp}
                     h_payload = {"id": f"{node_id_base}_h", "val": hum}
                     
                     try:
-                        # 增加 timeout 防止網路卡住程式
                         r_t = requests.post(RENDER_URL, json=t_payload, timeout=5)
                         r_h = requests.post(RENDER_URL, json=h_payload, timeout=5)
                         
                         if r_t.status_code == 200:
-                            print(f"🚀 雲端更新成功！{node_id_base}：溫 {temp} / 濕 {hum}")
+                            print(f"🚀 成功轉發 {node_id_base}：溫 {temp} / 濕 {hum}")
                         else:
-                            print(f"❌ 雲端拒絕數據！狀態碼: {r_t.status_code}")
+                            print(f"❌ 雲端拒絕: {r_t.status_code}")
                     except Exception as req_e:
-                        print(f"🌐 網路連線異常: {req_e}")
+                        print(f"🌐 網路連線失敗: {req_e}")
                     
                     last_update[node_id_base] = now
+            else:
+                print("⚠️ 格式不符，跳過解析")
 
         except Exception as e:
             print(f"⚠️ 解析錯誤: {e}")
