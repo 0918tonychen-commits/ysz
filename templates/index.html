@@ -8,23 +8,23 @@
     <style>
         /* --- 這裡維持你原本優美的 CSS 樣式 --- */
         body { font-family: 'Segoe UI', sans-serif; background: #0b1016; color: #e2e8f0; margin: 0; padding: 20px; display: flex; justify-content: center; min-height: 100vh; }
-        .container { width: 100%; max-width: 950px; background: rgba(20, 26, 35, 0.85); padding: 30px; border-radius: 28px; border: 1px solid rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); }
+        .container { width: 100%; max-width: 950px; background: rgba(20, 26, 35, 0.85); padding: 30px; border-radius: 28px; border: 1px solid rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); box-shadow: 0 20px 50px rgba(0,0,0,0.6); }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
         h1 { color: #00d2ff; font-size: 1.8rem; margin: 0; text-shadow: 0 0 15px rgba(0,210,255,0.5); }
         .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 10px; }
         .online { background: #00ff88; box-shadow: 0 0 12px #00ff88; animation: pulse 2s infinite; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-        .offline { background: #ff4757; }
+        .offline { background: #ff4757; box-shadow: 0 0 10px #ff4757; }
         .scada-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; }
         .card { background: #1e293b; border-radius: 20px; padding: 22px; cursor: pointer; transition: 0.3s; border: 1px solid transparent; }
         .card:hover { transform: translateY(-5px); border-color: #00d2ff; }
-        .card.active { background: rgba(0, 210, 255, 0.1); border-color: #00d2ff; }
+        .card.active { background: rgba(0, 210, 255, 0.1); border-color: #00d2ff; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
         .val-row { display: flex; justify-content: space-around; margin-top: 15px; }
-        .temp-color { color: #ff6384; }
-        .hum-color { color: #36a2eb; }
-        .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.5s; opacity: 0; }
-        .chart-wrapper.show { max-height: 500px; opacity: 1; padding-top: 20px; }
-        canvas { width: 100% !important; height: 300px !important; }
+        .temp-color { color: #ff6384; filter: drop-shadow(0 0 5px #ff6384); }
+        .hum-color { color: #36a2eb; filter: drop-shadow(0 0 5px #36a2eb); }
+        .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; }
+        .chart-wrapper.show { max-height: 500px; opacity: 1; padding-top: 25px; margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
+        canvas { width: 100% !important; height: 320px !important; }
     </style>
 </head>
 <body>
@@ -42,25 +42,39 @@
         <div id="chart-area" class="chart-wrapper">
             <canvas id="myChart"></canvas>
         </div>
-        <p style="text-align:center; color:#475569; margin-top:20px;">⚡ 點擊卡片切換趨勢圖</p>
+        <p style="text-align:center; color:#475569; margin-top:20px; font-size: 0.9rem;">⚡ 點擊卡片切換即時趨勢圖</p>
     </div>
 
     <script>
+        // 配置感測器清單
         const sensorConfig = {
-            "s01": { name: "1號監測點", icon: "🏢" },
-            "s02": { name: "2號監測點", icon: "🧪" },
-            "s03": { name: "3號監測點", icon: "🖥️" }
+            "s01": { name: "1號監測點", icon: "🌡️" },
+            "s02": { name: "2號監測點", icon: "🌬️" },
+            "s03": { name: "3號監測點", icon: "🧪" }
         };
 
         let currentActiveNode = null;
         const ctx = document.getElementById('myChart').getContext('2d');
+        
+        // 初始化 Chart.js
         const myChart = new Chart(ctx, {
             type: 'line',
-            data: { labels: [], datasets: [
-                { label: '溫度 (°C)', data: [], borderColor: '#ff6384', tension: 0.4 },
-                { label: '濕度 (%)', data: [], borderColor: '#36a2eb', tension: 0.4 }
-            ]},
-            options: { responsive: true, maintainAspectRatio: false }
+            data: { 
+                labels: [], 
+                datasets: [
+                    { label: '溫度 (°C)', data: [], borderColor: '#ff6384', backgroundColor: 'rgba(255,99,132,0.1)', fill: true, tension: 0.4 },
+                    { label: '濕度 (%)', data: [], borderColor: '#36a2eb', backgroundColor: 'rgba(54,162,235,0.1)', fill: true, tension: 0.4 }
+                ]
+            },
+            options: { 
+                responsive: true, 
+                maintainAspectRatio: false,
+                plugins: { legend: { labels: { color: '#94a3b8' } } },
+                scales: {
+                    x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+                    y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+                }
+            }
         });
 
         function createCards() {
@@ -68,10 +82,10 @@
             Object.keys(sensorConfig).forEach(id => {
                 grid.insertAdjacentHTML('beforeend', `
                     <div class="card" id="card-${id}" onclick="toggleChart('${id}')">
-                        <h3>${sensorConfig[id].icon} ${sensorConfig[id].name}</h3>
+                        <h3 style="margin:0; font-size:1rem; color:#94a3b8">${sensorConfig[id].icon} ${sensorConfig[id].name}</h3>
                         <div class="val-row">
-                            <h2 class="temp-color"><span id="${id}-t">--</span><small>°C</small></h2>
-                            <h2 class="hum-color"><span id="${id}-h">--</span><small>%</small></h2>
+                            <h2 class="temp-color"><span id="${id}-t">--</span><small style="font-size:0.8rem">°C</small></h2>
+                            <h2 class="hum-color"><span id="${id}-h">--</span><small style="font-size:0.8rem">%</small></h2>
                         </div>
                     </div>`);
             });
@@ -80,6 +94,7 @@
         function toggleChart(nodeId) {
             const wrapper = document.getElementById('chart-area');
             const cards = document.querySelectorAll('.card');
+            
             if (currentActiveNode === nodeId) {
                 currentActiveNode = null;
                 wrapper.classList.remove('show');
@@ -89,6 +104,8 @@
                 wrapper.classList.add('show');
                 cards.forEach(c => c.classList.remove('active'));
                 document.getElementById(`card-${nodeId}`).classList.add('active');
+                // 切換時立即更新一次圖表
+                fetchData();
             }
         }
 
@@ -96,34 +113,43 @@
             fetch('/api/all_data')
                 .then(res => res.json())
                 .then(data => {
-                    // 1. 更新卡片數據 (增加防呆檢查)
+                    // 1. 更新卡片即時數據 (加入數據存在檢查)
                     Object.keys(sensorConfig).forEach(id => {
                         const tElem = document.getElementById(`${id}-t`);
                         const hElem = document.getElementById(`${id}-h`);
+                        
+                        // 確保數據存在才更新，避免顯示 undefined
                         if (data[`${id}_t`]) tElem.innerText = data[`${id}_t`].val;
                         if (data[`${id}_h`]) hElem.innerText = data[`${id}_h`].val;
                     });
 
-                    // 2. 更新系統狀態
+                    // 2. 更新系統狀態燈
                     const isOnline = data.status === 'online';
-                    document.getElementById('status-text').innerText = isOnline ? 'SYSTEM ONLINE' : 'SYSTEM OFFLINE';
-                    document.getElementById('status-dot').className = `status-dot ${isOnline ? 'online' : 'offline'}`;
+                    const statusText = document.getElementById('status-text');
+                    const statusDot = document.getElementById('status-dot');
+                    statusText.innerText = isOnline ? 'SYSTEM ONLINE' : 'SYSTEM OFFLINE';
+                    statusDot.className = `status-dot ${isOnline ? 'online' : 'offline'}`;
 
-                    // 3. 更新圖表
+                    // 3. 更新圖表數據
                     if (currentActiveNode && data.history && data.history[currentActiveNode]) {
                         const h = data.history[currentActiveNode];
+                        
+                        // 確保歷史標籤與數據長度同步
                         myChart.data.labels = h.labels || [];
                         myChart.data.datasets[0].data = h.temp || [];
                         myChart.data.datasets[1].data = h.hum || [];
-                        myChart.update('none');
+                        
+                        // 'none' 模式可以讓圖表更新更平滑，不重畫動畫
+                        myChart.update('none'); 
                     }
                 })
                 .catch(err => console.error("Fetch Error:", err));
         }
 
+        // 啟動程序
         createCards();
         fetchData();
-        setInterval(fetchData, 3000); // 每 3 秒同步一次雲端數據
+        setInterval(fetchData, 3000); // 每 3 秒從雲端同步一次數據
     </script>
 </body>
 </html>
