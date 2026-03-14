@@ -26,7 +26,6 @@
         .air-color { color: #00ff88; filter: drop-shadow(0 0 5px #00ff88); }
         .pm-color { color: #7bed9f; filter: drop-shadow(0 0 5px #7bed9f); }
         
-        /* --- 滾動圖表容器配置 --- */
         .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; }
         .chart-wrapper.show { max-height: 500px; opacity: 1; padding-top: 25px; margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .scroll-container { width: 100%; overflow-x: auto; scroll-behavior: smooth; }
@@ -62,7 +61,7 @@
         const sensorConfig = {
             "s01": { name: "1號環境站", icon: "🌡️", type: "env" },
             "s02": { name: "空氣品質全監測", icon: "🌬️", type: "air_all" },
-            "s03": { name: "懸浮微粒監測", icon: "😷", type: "pm_data" } // 改為 PM 監測類型
+            "s03": { name: "懸浮微粒監測", icon: "😷", type: "pm_data" }
         };
 
         let currentActiveNode = null;
@@ -82,12 +81,14 @@
                     x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
                     y: { 
                         type: 'linear', display: true, position: 'left',
+                        beginAtZero: true,
                         ticks: { color: '#e2e8f0' },
                         grid: { color: 'rgba(255,255,255,0.05)' },
                         title: { display: true, text: '數值', color: '#94a3b8' }
                     },
                     y1: { 
                         type: 'linear', display: false, position: 'right',
+                        beginAtZero: true,
                         ticks: { color: '#00ff88' },
                         grid: { drawOnChartArea: false },
                         title: { display: true, text: 'CO2 (ppm)', color: '#94a3b8' }
@@ -101,7 +102,6 @@
             Object.keys(sensorConfig).forEach(id => {
                 const conf = sensorConfig[id];
                 let content = "";
-                
                 if (conf.type === "env") {
                     content = `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
                                <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>`;
@@ -112,7 +112,6 @@
                     content = `<div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM2.5</span><h2 class="pm-color"><span id="${id}-pm25">--</span></h2></div>
                                <div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM10</span><h2 class="pm-color" style="filter:hue-rotate(45deg)"><span id="${id}-pm10">--</span></h2></div>`;
                 }
-
                 grid.insertAdjacentHTML('beforeend', `
                     <div class="card" id="card-${id}" onclick="toggleChart('${id}')">
                         <h3 style="margin:0; font-size:1rem; color:#94a3b8">${conf.icon} ${conf.name}</h3>
@@ -144,7 +143,6 @@
                 .then(data => {
                     units = data.units || {}; 
                     Object.keys(sensorConfig).forEach(id => {
-                        // 增加 pm25 與 pm10 抓取
                         ["t", "h", "co2", "voc", "vib", "pm25", "pm10"].forEach(m => {
                             const valElem = document.getElementById(`${id}-${m}`);
                             if (valElem && data[`${id}_${m}`]) {
@@ -163,34 +161,39 @@
                         const h = data.history[currentActiveNode];
                         const type = sensorConfig[currentActiveNode].type;
                         
-                        // 動態寬度：設定點距為 60px 讓捲軸更容易出現
+                        // 動態寬度設定
                         const dataCount = h.labels.length;
                         const containerWidth = document.getElementById('scroll-box').clientWidth;
                         const targetWidth = Math.max(containerWidth, dataCount * 60);
                         document.getElementById('canvas-container').style.width = targetWidth + 'px';
 
+                        // 修正跳動：控制動畫時間
                         let animDuration = initialLoadMap[currentActiveNode] ? 0 : 1000;
                         initialLoadMap[currentActiveNode] = true;
 
-                        myChart.data.labels = h.labels || [];
+                        // 修正 Y 軸：清除鎖定值
+                        myChart.options.scales.y.min = null;
+                        myChart.options.scales.y.max = null;
                         myChart.options.scales.y1.display = (type === "air_all");
 
+                        myChart.data.labels = h.labels || [];
+                        
                         let newDatasets = [];
                         if (type === "env") {
                             newDatasets = [
-                                { label: `溫度 (°C)`, data: h.temp, borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
-                                { label: `濕度 (%)`, data: h.hum, borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
+                                { label: `溫度 (°C)`, data: h.temp.map(Number), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
+                                { label: `濕度 (%)`, data: h.hum.map(Number), borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
                             ];
                         } else if (type === "air_all") {
                             newDatasets = [
-                                { label: `CO2 (ppm)`, data: h.co2, borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
-                                { label: `溫度 (°C)`, data: h.temp, borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
-                                { label: `濕度 (%)`, data: h.hum, borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
+                                { label: `CO2 (ppm)`, data: h.co2.map(Number), borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
+                                { label: `溫度 (°C)`, data: h.temp.map(Number), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
+                                { label: `濕度 (%)`, data: h.hum.map(Number), borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
                             ];
                         } else if (type === "pm_data") {
                             newDatasets = [
-                                { label: `PM2.5 (μg/m³)`, data: h.pm25, borderColor: '#00ff88', yAxisID: 'y', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
-                                { label: `PM10 (μg/m³)`, data: h.pm10, borderColor: '#7bed9f', yAxisID: 'y', tension: 0.4 }
+                                { label: `PM2.5 (μg/m³)`, data: h.pm25.map(Number), borderColor: '#00ff88', yAxisID: 'y', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
+                                { label: `PM10 (μg/m³)`, data: h.pm10.map(Number), borderColor: '#7bed9f', yAxisID: 'y', tension: 0.4 }
                             ];
                         }
 
