@@ -6,7 +6,7 @@
     <title>LoRa SCADA 智能監控中心</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        /* --- 維持原本優美的 CSS 樣式 --- */
+        /* --- 玻璃擬態 CSS 樣式 --- */
         body { font-family: 'Segoe UI', sans-serif; background: #0b1016; color: #e2e8f0; margin: 0; padding: 20px; display: flex; justify-content: center; min-height: 100vh; }
         .container { width: 100%; max-width: 950px; background: rgba(20, 26, 35, 0.85); padding: 30px; border-radius: 28px; border: 1px solid rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); box-shadow: 0 20px 50px rgba(0,0,0,0.6); }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
@@ -49,10 +49,10 @@
     </div>
 
     <script>
-        // --- 1. 配置感測器清單 (優化 SCD30 為 air_all) ---
+        // --- 1. 配置感測器清單 ---
         const sensorConfig = {
             "s01": { name: "1號環境站", icon: "🌡️", type: "env" },
-            "s02": { name: "空氣品質全監測", icon: "🌬️", type: "air_all" }, // 三合一站點
+            "s02": { name: "空氣品質全監測", icon: "🌬️", type: "air_all" },
             "s03": { name: "設備監測站", icon: "🚜", type: "machine" }
         };
 
@@ -60,59 +60,52 @@
         let units = {}; 
         const ctx = document.getElementById('myChart').getContext('2d');
         
-        // --- 2. 初始化 Chart.js (配置雙 Y 軸) ---
+        // --- 2. 初始化 Chart.js (雙 Y 軸配置) ---
         const myChart = new Chart(ctx, {
             type: 'line',
             data: { labels: [], datasets: [] },
             options: { 
                 responsive: true, 
                 maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false }, // 滑鼠移上去顯示同時間所有數據
+                interaction: { mode: 'index', intersect: false },
                 plugins: { legend: { labels: { color: '#94a3b8' } } },
                 scales: {
                     x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
-                    // 左側 Y 軸：溫濕度、震動
                     y: { 
                         type: 'linear', display: true, position: 'left',
                         ticks: { color: '#ff6384' },
                         grid: { color: 'rgba(255,255,255,0.05)' },
-                        title: { display: true, text: '溫濕度 / 震動', color: '#94a3b8' }
+                        title: { display: true, text: '數值', color: '#94a3b8' }
                     },
-                    // 右側 Y 軸：CO2
                     y1: { 
-                        type: 'linear', display: true, position: 'right',
+                        type: 'linear', display: false, position: 'right',
                         ticks: { color: '#00ff88' },
-                        grid: { drawOnChartArea: false }, // 避免網格線打架
-                        title: { display: true, text: 'CO2 (ppm)', color: '#94a3b8' }
+                        grid: { drawOnChartArea: false },
+                        title: { display: false, text: 'CO2 (ppm)', color: '#94a3b8' }
                     }
                 }
             }
         });
 
-        // --- 3. 動態建立卡片 ---
         function createCards() {
             const grid = document.getElementById('scada-grid');
             Object.keys(sensorConfig).forEach(id => {
                 const conf = sensorConfig[id];
                 let content = "";
-                
                 if (conf.type === "env") {
                     content = `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
                                <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>`;
                 } else if (conf.type === "air_all") {
-                    // 三合一版面：CO2 放大，溫濕度並列下方
-                    content = `
-                        <div style="width:100%; text-align:center; margin-bottom:10px;">
-                            <h2 class="air-color" style="margin:5px 0;"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2>
-                        </div>
-                        <div class="val-row" style="width:100%; border-top: 1px solid rgba(255,255,255,0.1); padding-top:10px;">
-                            <div class="temp-color"><span id="${id}-t">--</span>°C</div>
-                            <div class="hum-color"><span id="${id}-h">--</span>%</div>
-                        </div>`;
+                    content = `<div style="width:100%; text-align:center; margin-bottom:10px;">
+                                <h2 class="air-color" style="margin:5px 0;"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2>
+                               </div>
+                               <div class="val-row" style="width:100%; border-top: 1px solid rgba(255,255,255,0.1); padding-top:10px;">
+                                <div class="temp-color"><span id="${id}-t">--</span>°C</div>
+                                <div class="hum-color"><span id="${id}-h">--</span>%</div>
+                               </div>`;
                 } else if (conf.type === "machine") {
                     content = `<div class="val-item"><h2 class="vib-color"><span id="${id}-vib">--</span><small id="${id}-vib-unit"></small></h2></div>`;
                 }
-
                 grid.insertAdjacentHTML('beforeend', `
                     <div class="card" id="card-${id}" onclick="toggleChart('${id}')">
                         <h3 style="margin:0; font-size:1rem; color:#94a3b8">${conf.icon} ${conf.name}</h3>
@@ -137,13 +130,11 @@
             }
         }
 
-        // --- 4. 數據抓取與雙 Y 軸更新 ---
         function fetchData() {
             fetch('/api/all_data')
                 .then(res => res.json())
                 .then(data => {
                     units = data.units || {}; 
-                    
                     Object.keys(sensorConfig).forEach(id => {
                         const metrics = ["t", "h", "co2", "voc", "vib"];
                         metrics.forEach(m => {
@@ -164,11 +155,13 @@
                         const h = data.history[currentActiveNode];
                         const type = sensorConfig[currentActiveNode].type;
                         myChart.data.labels = h.labels || [];
+                        
+                        // 強制更新雙 Y 軸佈局
+                        const isAirAll = (type === "air_all");
+                        myChart.options.scales.y1.display = isAirAll;
+                        myChart.options.scales.y1.title.display = isAirAll;
+
                         let newDatasets = [];
-
-                        // 判斷是否需要啟用右側 Y 軸
-                        myChart.options.scales.y1.display = (type === "air_all");
-
                         if (type === "env") {
                             newDatasets = [
                                 { label: `溫度 (${units.t})`, data: h.temp, borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
@@ -187,7 +180,7 @@
                         }
 
                         myChart.data.datasets = newDatasets;
-                        myChart.update('none'); 
+                        myChart.update(); // 重新計算佈局
                     }
                 });
         }
