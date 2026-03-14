@@ -20,10 +20,11 @@
         .card:hover { transform: translateY(-5px); border-color: #00d2ff; }
         .card.active { background: rgba(0, 210, 255, 0.1); border-color: #00d2ff; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
         .val-row { display: flex; justify-content: space-around; margin-top: 15px; flex-wrap: wrap; }
+        .val-item { text-align: center; flex: 1; }
         .temp-color { color: #ff6384; filter: drop-shadow(0 0 5px #ff6384); }
         .hum-color { color: #36a2eb; filter: drop-shadow(0 0 5px #36a2eb); }
         .air-color { color: #00ff88; filter: drop-shadow(0 0 5px #00ff88); }
-        .vib-color { color: #ff9f43; filter: drop-shadow(0 0 5px #ff9f43); }
+        .pm-color { color: #7bed9f; filter: drop-shadow(0 0 5px #7bed9f); }
         
         /* --- 滾動圖表容器配置 --- */
         .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; }
@@ -32,6 +33,7 @@
         .scroll-container::-webkit-scrollbar { height: 6px; }
         .scroll-container::-webkit-scrollbar-thumb { background: rgba(0, 210, 255, 0.3); border-radius: 10px; }
         .canvas-holder { height: 320px; min-width: 100%; }
+        canvas { width: 100% !important; height: 100% !important; }
     </style>
 </head>
 <body>
@@ -60,12 +62,12 @@
         const sensorConfig = {
             "s01": { name: "1號環境站", icon: "🌡️", type: "env" },
             "s02": { name: "空氣品質全監測", icon: "🌬️", type: "air_all" },
-            "s03": { name: "設備監測站", icon: "🚜", type: "machine" }
+            "s03": { name: "懸浮微粒監測", icon: "😷", type: "pm_data" } // 改為 PM 監測類型
         };
 
         let currentActiveNode = null;
         let units = {}; 
-        let initialLoadMap = {}; // 紀錄各節點是否已完成首波載入
+        let initialLoadMap = {}; 
         const ctx = document.getElementById('myChart').getContext('2d');
         
         const myChart = new Chart(ctx, {
@@ -80,13 +82,15 @@
                     x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
                     y: { 
                         type: 'linear', display: true, position: 'left',
-                        ticks: { color: '#ff6384' },
-                        grid: { color: 'rgba(255,255,255,0.05)' }
+                        ticks: { color: '#e2e8f0' },
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                        title: { display: true, text: '數值', color: '#94a3b8' }
                     },
                     y1: { 
                         type: 'linear', display: false, position: 'right',
                         ticks: { color: '#00ff88' },
-                        grid: { drawOnChartArea: false }
+                        grid: { drawOnChartArea: false },
+                        title: { display: true, text: 'CO2 (ppm)', color: '#94a3b8' }
                     }
                 }
             }
@@ -96,13 +100,18 @@
             const grid = document.getElementById('scada-grid');
             Object.keys(sensorConfig).forEach(id => {
                 const conf = sensorConfig[id];
-                let content = (conf.type === "env") ? 
-                    `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
-                     <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>` :
-                    (conf.type === "air_all") ?
-                    `<div style="width:100%; text-align:center; margin-bottom:10px;"><h2 class="air-color"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2></div>
-                     <div class="val-row" style="width:100%; border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;"><div class="temp-color"><span id="${id}-t">--</span>°C</div><div class="hum-color"><span id="${id}-h">--</span>%</div></div>` :
-                    `<div class="val-item"><h2 class="vib-color"><span id="${id}-vib">--</span><small id="${id}-vib-unit"></small></h2></div>`;
+                let content = "";
+                
+                if (conf.type === "env") {
+                    content = `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
+                               <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>`;
+                } else if (conf.type === "air_all") {
+                    content = `<div style="width:100%; text-align:center; margin-bottom:10px;"><h2 class="air-color"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2></div>
+                               <div class="val-row" style="width:100%; border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;"><div class="temp-color"><span id="${id}-t">--</span>°C</div><div class="hum-color"><span id="${id}-h">--</span>%</div></div>`;
+                } else if (conf.type === "pm_data") {
+                    content = `<div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM2.5</span><h2 class="pm-color"><span id="${id}-pm25">--</span></h2></div>
+                               <div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM10</span><h2 class="pm-color" style="filter:hue-rotate(45deg)"><span id="${id}-pm10">--</span></h2></div>`;
+                }
 
                 grid.insertAdjacentHTML('beforeend', `
                     <div class="card" id="card-${id}" onclick="toggleChart('${id}')">
@@ -120,7 +129,7 @@
                 wrapper.classList.remove('show');
                 cards.forEach(c => c.classList.remove('active'));
             } else {
-                initialLoadMap[nodeId] = false; // 切換時重設動畫開關
+                initialLoadMap[nodeId] = false; 
                 currentActiveNode = nodeId;
                 wrapper.classList.add('show');
                 cards.forEach(c => c.classList.remove('active'));
@@ -135,7 +144,8 @@
                 .then(data => {
                     units = data.units || {}; 
                     Object.keys(sensorConfig).forEach(id => {
-                        ["t", "h", "co2", "voc", "vib"].forEach(m => {
+                        // 增加 pm25 與 pm10 抓取
+                        ["t", "h", "co2", "voc", "vib", "pm25", "pm10"].forEach(m => {
                             const valElem = document.getElementById(`${id}-${m}`);
                             if (valElem && data[`${id}_${m}`]) {
                                 valElem.innerText = data[`${id}_${m}`].val;
@@ -153,13 +163,12 @@
                         const h = data.history[currentActiveNode];
                         const type = sensorConfig[currentActiveNode].type;
                         
-                        // 動態寬度計算
+                        // 動態寬度：設定點距為 60px 讓捲軸更容易出現
                         const dataCount = h.labels.length;
                         const containerWidth = document.getElementById('scroll-box').clientWidth;
-                        const targetWidth = Math.max(containerWidth, dataCount * 40);
+                        const targetWidth = Math.max(containerWidth, dataCount * 60);
                         document.getElementById('canvas-container').style.width = targetWidth + 'px';
 
-                        // 動態動畫時間控制
                         let animDuration = initialLoadMap[currentActiveNode] ? 0 : 1000;
                         initialLoadMap[currentActiveNode] = true;
 
@@ -169,25 +178,25 @@
                         let newDatasets = [];
                         if (type === "env") {
                             newDatasets = [
-                                { label: `溫度 (${units.t})`, data: h.temp, borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
-                                { label: `濕度 (${units.h})`, data: h.hum, borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
+                                { label: `溫度 (°C)`, data: h.temp, borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
+                                { label: `濕度 (%)`, data: h.hum, borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
                             ];
                         } else if (type === "air_all") {
                             newDatasets = [
-                                { label: `CO2 (${units.co2})`, data: h.co2, borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
-                                { label: `溫度 (${units.t})`, data: h.temp, borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
-                                { label: `濕度 (${units.h})`, data: h.hum, borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
+                                { label: `CO2 (ppm)`, data: h.co2, borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
+                                { label: `溫度 (°C)`, data: h.temp, borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
+                                { label: `濕度 (%)`, data: h.hum, borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
                             ];
-                        } else if (type === "machine") {
+                        } else if (type === "pm_data") {
                             newDatasets = [
-                                { label: `震動 (${units.vib})`, data: h.vib, borderColor: '#ff9f43', yAxisID: 'y', tension: 0.4 }
+                                { label: `PM2.5 (μg/m³)`, data: h.pm25, borderColor: '#00ff88', yAxisID: 'y', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
+                                { label: `PM10 (μg/m³)`, data: h.pm10, borderColor: '#7bed9f', yAxisID: 'y', tension: 0.4 }
                             ];
                         }
 
                         myChart.data.datasets = newDatasets;
-                        myChart.update({ duration: animDuration }); // 更新並套用動畫時長
+                        myChart.update({ duration: animDuration }); 
                         
-                        // 自動捲動到最右端
                         const scrollBox = document.getElementById('scroll-box');
                         setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 100);
                     }
