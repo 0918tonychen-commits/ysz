@@ -20,14 +20,18 @@
         .card:hover { transform: translateY(-5px); border-color: #00d2ff; }
         .card.active { background: rgba(0, 210, 255, 0.1); border-color: #00d2ff; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
         .val-row { display: flex; justify-content: space-around; margin-top: 15px; flex-wrap: wrap; }
-        .val-item { text-align: center; padding: 5px; }
         .temp-color { color: #ff6384; filter: drop-shadow(0 0 5px #ff6384); }
         .hum-color { color: #36a2eb; filter: drop-shadow(0 0 5px #36a2eb); }
         .air-color { color: #00ff88; filter: drop-shadow(0 0 5px #00ff88); }
         .vib-color { color: #ff9f43; filter: drop-shadow(0 0 5px #ff9f43); }
+        
+        /* --- 滾動圖表容器配置 --- */
         .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; }
         .chart-wrapper.show { max-height: 500px; opacity: 1; padding-top: 25px; margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
-        canvas { width: 100% !important; height: 320px !important; }
+        .scroll-container { width: 100%; overflow-x: auto; scroll-behavior: smooth; }
+        .scroll-container::-webkit-scrollbar { height: 6px; }
+        .scroll-container::-webkit-scrollbar-thumb { background: rgba(0, 210, 255, 0.3); border-radius: 10px; }
+        .canvas-holder { height: 320px; min-width: 100%; }
     </style>
 </head>
 <body>
@@ -43,13 +47,16 @@
         <div id="scada-grid" class="scada-grid"></div>
 
         <div id="chart-area" class="chart-wrapper">
-            <canvas id="myChart"></canvas>
+            <div class="scroll-container" id="scroll-box">
+                <div class="canvas-holder" id="canvas-container">
+                    <canvas id="myChart"></canvas>
+                </div>
+            </div>
         </div>
-        <p style="text-align:center; color:#475569; margin-top:20px; font-size: 0.9rem;">⚡ 點擊卡片切換即時趨勢圖</p>
+        <p style="text-align:center; color:#475569; margin-top:20px; font-size: 0.9rem;">⚡ 點擊卡片顯示趨勢 | 左右滑動查看歷史</p>
     </div>
 
     <script>
-        // --- 1. 配置感測器清單 ---
         const sensorConfig = {
             "s01": { name: "1號環境站", icon: "🌡️", type: "env" },
             "s02": { name: "空氣品質全監測", icon: "🌬️", type: "air_all" },
@@ -58,9 +65,9 @@
 
         let currentActiveNode = null;
         let units = {}; 
+        let initialLoadMap = {}; // 紀錄各節點是否已完成首波載入
         const ctx = document.getElementById('myChart').getContext('2d');
         
-        // --- 2. 初始化 Chart.js (雙 Y 軸配置) ---
         const myChart = new Chart(ctx, {
             type: 'line',
             data: { labels: [], datasets: [] },
@@ -74,14 +81,12 @@
                     y: { 
                         type: 'linear', display: true, position: 'left',
                         ticks: { color: '#ff6384' },
-                        grid: { color: 'rgba(255,255,255,0.05)' },
-                        title: { display: true, text: '數值', color: '#94a3b8' }
+                        grid: { color: 'rgba(255,255,255,0.05)' }
                     },
                     y1: { 
                         type: 'linear', display: false, position: 'right',
                         ticks: { color: '#00ff88' },
-                        grid: { drawOnChartArea: false },
-                        title: { display: false, text: 'CO2 (ppm)', color: '#94a3b8' }
+                        grid: { drawOnChartArea: false }
                     }
                 }
             }
@@ -91,21 +96,14 @@
             const grid = document.getElementById('scada-grid');
             Object.keys(sensorConfig).forEach(id => {
                 const conf = sensorConfig[id];
-                let content = "";
-                if (conf.type === "env") {
-                    content = `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
-                               <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>`;
-                } else if (conf.type === "air_all") {
-                    content = `<div style="width:100%; text-align:center; margin-bottom:10px;">
-                                <h2 class="air-color" style="margin:5px 0;"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2>
-                               </div>
-                               <div class="val-row" style="width:100%; border-top: 1px solid rgba(255,255,255,0.1); padding-top:10px;">
-                                <div class="temp-color"><span id="${id}-t">--</span>°C</div>
-                                <div class="hum-color"><span id="${id}-h">--</span>%</div>
-                               </div>`;
-                } else if (conf.type === "machine") {
-                    content = `<div class="val-item"><h2 class="vib-color"><span id="${id}-vib">--</span><small id="${id}-vib-unit"></small></h2></div>`;
-                }
+                let content = (conf.type === "env") ? 
+                    `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
+                     <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>` :
+                    (conf.type === "air_all") ?
+                    `<div style="width:100%; text-align:center; margin-bottom:10px;"><h2 class="air-color"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2></div>
+                     <div class="val-row" style="width:100%; border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;"><div class="temp-color"><span id="${id}-t">--</span>°C</div><div class="hum-color"><span id="${id}-h">--</span>%</div></div>` :
+                    `<div class="val-item"><h2 class="vib-color"><span id="${id}-vib">--</span><small id="${id}-vib-unit"></small></h2></div>`;
+
                 grid.insertAdjacentHTML('beforeend', `
                     <div class="card" id="card-${id}" onclick="toggleChart('${id}')">
                         <h3 style="margin:0; font-size:1rem; color:#94a3b8">${conf.icon} ${conf.name}</h3>
@@ -122,6 +120,7 @@
                 wrapper.classList.remove('show');
                 cards.forEach(c => c.classList.remove('active'));
             } else {
+                initialLoadMap[nodeId] = false; // 切換時重設動畫開關
                 currentActiveNode = nodeId;
                 wrapper.classList.add('show');
                 cards.forEach(c => c.classList.remove('active'));
@@ -136,12 +135,11 @@
                 .then(data => {
                     units = data.units || {}; 
                     Object.keys(sensorConfig).forEach(id => {
-                        const metrics = ["t", "h", "co2", "voc", "vib"];
-                        metrics.forEach(m => {
+                        ["t", "h", "co2", "voc", "vib"].forEach(m => {
                             const valElem = document.getElementById(`${id}-${m}`);
-                            const unitElem = document.getElementById(`${id}-${m}-unit`);
                             if (valElem && data[`${id}_${m}`]) {
                                 valElem.innerText = data[`${id}_${m}`].val;
+                                const unitElem = document.getElementById(`${id}-${m}-unit`);
                                 if (unitElem && units[m]) unitElem.innerText = units[m];
                             }
                         });
@@ -154,12 +152,19 @@
                     if (currentActiveNode && data.history && data.history[currentActiveNode]) {
                         const h = data.history[currentActiveNode];
                         const type = sensorConfig[currentActiveNode].type;
-                        myChart.data.labels = h.labels || [];
                         
-                        // 強制更新雙 Y 軸佈局
-                        const isAirAll = (type === "air_all");
-                        myChart.options.scales.y1.display = isAirAll;
-                        myChart.options.scales.y1.title.display = isAirAll;
+                        // 動態寬度計算
+                        const dataCount = h.labels.length;
+                        const containerWidth = document.getElementById('scroll-box').clientWidth;
+                        const targetWidth = Math.max(containerWidth, dataCount * 40);
+                        document.getElementById('canvas-container').style.width = targetWidth + 'px';
+
+                        // 動態動畫時間控制
+                        let animDuration = initialLoadMap[currentActiveNode] ? 0 : 1000;
+                        initialLoadMap[currentActiveNode] = true;
+
+                        myChart.data.labels = h.labels || [];
+                        myChart.options.scales.y1.display = (type === "air_all");
 
                         let newDatasets = [];
                         if (type === "env") {
@@ -180,7 +185,11 @@
                         }
 
                         myChart.data.datasets = newDatasets;
-                        myChart.update(); // 重新計算佈局
+                        myChart.update({ duration: animDuration }); // 更新並套用動畫時長
+                        
+                        // 自動捲動到最右端
+                        const scrollBox = document.getElementById('scroll-box');
+                        setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 100);
                     }
                 });
         }
