@@ -15,10 +15,12 @@
         .online { background: #00ff88; box-shadow: 0 0 12px #00ff88; animation: pulse 2s infinite; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
         .offline { background: #ff4757; box-shadow: 0 0 10px #ff4757; }
+        
         .scada-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; }
-        .card { background: #1e293b; border-radius: 20px; padding: 22px; cursor: pointer; transition: 0.3s; border: 1px solid transparent; }
+        .card { background: #1e293b; border-radius: 20px; padding: 22px; cursor: pointer; transition: 0.3s; border: 1px solid transparent; position: relative; overflow: hidden; }
         .card:hover { transform: translateY(-5px); border-color: #00d2ff; }
         .card.active { background: rgba(0, 210, 255, 0.1); border-color: #00d2ff; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
+        
         .val-row { display: flex; justify-content: space-around; margin-top: 15px; flex-wrap: wrap; }
         .val-item { text-align: center; flex: 1; }
         .temp-color { color: #ff6384; filter: drop-shadow(0 0 5px #ff6384); }
@@ -26,6 +28,7 @@
         .air-color { color: #00ff88; filter: drop-shadow(0 0 5px #00ff88); }
         .pm-color { color: #7bed9f; filter: drop-shadow(0 0 5px #7bed9f); }
         
+        /* --- 滾動區域配置 --- */
         .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; }
         .chart-wrapper.show { max-height: 500px; opacity: 1; padding-top: 25px; margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .scroll-container { width: 100%; overflow-x: auto; scroll-behavior: smooth; }
@@ -54,7 +57,7 @@
                 </div>
             </div>
         </div>
-        <p style="text-align:center; color:#475569; margin-top:20px; font-size: 0.9rem;">⚡ 點擊卡片顯示趨勢 | 左右滑動查看歷史</p>
+        <p style="text-align:center; color:#475569; margin-top:20px; font-size: 0.9rem;">⚡ 點擊卡片顯示趨勢 | 左右滑動查看歷史 | 智慧靜態更新已啟動</p>
     </div>
 
     <script>
@@ -65,7 +68,6 @@
         };
 
         let currentActiveNode = null;
-        let units = {}; 
         let initialLoadMap = {}; 
         const ctx = document.getElementById('myChart').getContext('2d');
         
@@ -82,7 +84,7 @@
                     y: { 
                         type: 'linear', display: true, position: 'left',
                         beginAtZero: true,
-                        ticks: { color: '#e2e8f0' },
+                        ticks: { color: '#ff6384' },
                         grid: { color: 'rgba(255,255,255,0.05)' },
                         title: { display: true, text: '數值', color: '#94a3b8' }
                     },
@@ -103,11 +105,11 @@
                 const conf = sensorConfig[id];
                 let content = "";
                 if (conf.type === "env") {
-                    content = `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
-                               <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>`;
+                    content = `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span>°C</h2></div>
+                               <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span>%</h2></div>`;
                 } else if (conf.type === "air_all") {
-                    content = `<div style="width:100%; text-align:center; margin-bottom:10px;"><h2 class="air-color"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2></div>
-                               <div class="val-row" style="width:100%; border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;"><div class="temp-color"><span id="${id}-t">--</span>°C</div><div class="hum-color"><span id="${id}-h">--</span>%</div></div>`;
+                    content = `<div style="width:100%; text-align:center; margin-bottom:10px;"><h2 class="air-color"><span id="${id}-co2">--</span><small>ppm</small></h2></div>
+                               <div class="val-row" style="width:100%; border-top: 1px solid rgba(255,255,255,0.1); padding-top:10px;"><div class="temp-color"><span id="${id}-t">--</span>°C</div><div class="hum-color"><span id="${id}-h">--</span>%</div></div>`;
                 } else if (conf.type === "pm_data") {
                     content = `<div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM2.5</span><h2 class="pm-color"><span id="${id}-pm25">--</span></h2></div>
                                <div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM10</span><h2 class="pm-color" style="filter:hue-rotate(45deg)"><span id="${id}-pm10">--</span></h2></div>`;
@@ -141,15 +143,11 @@
             fetch('/api/all_data')
                 .then(res => res.json())
                 .then(data => {
-                    units = data.units || {}; 
+                    // 更新卡片數值
                     Object.keys(sensorConfig).forEach(id => {
                         ["t", "h", "co2", "voc", "vib", "pm25", "pm10"].forEach(m => {
                             const valElem = document.getElementById(`${id}-${m}`);
-                            if (valElem && data[`${id}_${m}`]) {
-                                valElem.innerText = data[`${id}_${m}`].val;
-                                const unitElem = document.getElementById(`${id}-${m}-unit`);
-                                if (unitElem && units[m]) unitElem.innerText = units[m];
-                            }
+                            if (valElem && data[`${id}_${m}`]) valElem.innerText = data[`${id}_${m}`].val;
                         });
                     });
 
@@ -161,36 +159,44 @@
                         const h = data.history[currentActiveNode];
                         const type = sensorConfig[currentActiveNode].type;
                         
-                        // 動態寬度設定
-                        const dataCount = h.labels.length;
-                        const containerWidth = document.getElementById('scroll-box').clientWidth;
-                        const targetWidth = Math.max(containerWidth, dataCount * 60);
-                        document.getElementById('canvas-container').style.width = targetWidth + 'px';
-
-                        // 修正跳動：控制動畫時間
-                        let animDuration = initialLoadMap[currentActiveNode] ? 0 : 1000;
+                        // --- 核心更新邏輯：徹底解決跳動 ---
+                        let isFirstLoad = !initialLoadMap[currentActiveNode];
                         initialLoadMap[currentActiveNode] = true;
 
-                        // 修正 Y 軸：清除鎖定值
-                        myChart.options.scales.y.min = null;
-                        myChart.options.scales.y.max = null;
+                        // 動態寬度與 Y 軸洗牌
+                        const dataCount = h.labels.length;
+                        const containerWidth = document.getElementById('scroll-box').clientWidth;
+                        document.getElementById('canvas-container').style.width = Math.max(containerWidth, dataCount * 60) + 'px';
+
+                        // 禁用自動更新時的動畫，鎖定 Y 軸範圍
+                        myChart.options.animation = isFirstLoad ? { duration: 1000 } : false;
+                        myChart.options.transitions = isFirstLoad ? {} : { active: { animation: { duration: 0 } } };
+                        myChart.options.scales.y.min = 0;
+                        myChart.options.scales.y.suggestedMax = 100;
                         myChart.options.scales.y1.display = (type === "air_all");
 
                         myChart.data.labels = h.labels || [];
                         
                         let newDatasets = [];
                         if (type === "env") {
+                            myChart.options.scales.y.title.text = "溫濕度";
+                            myChart.options.scales.y.ticks.color = '#ff6384';
                             newDatasets = [
                                 { label: `溫度 (°C)`, data: h.temp.map(Number), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
                                 { label: `濕度 (%)`, data: h.hum.map(Number), borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
                             ];
                         } else if (type === "air_all") {
+                            myChart.options.scales.y.title.text = "溫濕度";
+                            myChart.options.scales.y.ticks.color = '#ff6384';
+                            myChart.options.scales.y1.suggestedMax = 1500;
                             newDatasets = [
                                 { label: `CO2 (ppm)`, data: h.co2.map(Number), borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
                                 { label: `溫度 (°C)`, data: h.temp.map(Number), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
                                 { label: `濕度 (%)`, data: h.hum.map(Number), borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
                             ];
                         } else if (type === "pm_data") {
+                            myChart.options.scales.y.title.text = "濃度 (μg/m³)";
+                            myChart.options.scales.y.ticks.color = '#00ff88';
                             newDatasets = [
                                 { label: `PM2.5 (μg/m³)`, data: h.pm25.map(Number), borderColor: '#00ff88', yAxisID: 'y', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
                                 { label: `PM10 (μg/m³)`, data: h.pm10.map(Number), borderColor: '#7bed9f', yAxisID: 'y', tension: 0.4 }
@@ -198,10 +204,16 @@
                         }
 
                         myChart.data.datasets = newDatasets;
-                        myChart.update({ duration: animDuration }); 
                         
+                        // 使用智慧模式更新：首次使用動畫，後續使用 none 靜態模式
+                        myChart.update(isFirstLoad ? 'default' : 'none'); 
+
+                        // 智慧自動捲動 (只有在查看最新數據時才跟隨)
                         const scrollBox = document.getElementById('scroll-box');
-                        setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 100);
+                        const isAtEnd = scrollBox.scrollLeft + scrollBox.clientWidth >= scrollBox.scrollWidth - 120;
+                        if (isFirstLoad || isAtEnd) {
+                            setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 50);
+                        }
                     }
                 });
         }
