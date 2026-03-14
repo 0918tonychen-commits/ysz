@@ -6,7 +6,7 @@
     <title>LoRa SCADA 智能監控中心</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        /* --- 這裡維持你原本優美的 CSS 樣式 --- */
+        /* --- 這裡完整維持您原本優美的 CSS 樣式 --- */
         body { font-family: 'Segoe UI', sans-serif; background: #0b1016; color: #e2e8f0; margin: 0; padding: 20px; display: flex; justify-content: center; min-height: 100vh; }
         .container { width: 100%; max-width: 950px; background: rgba(20, 26, 35, 0.85); padding: 30px; border-radius: 28px; border: 1px solid rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); box-shadow: 0 20px 50px rgba(0,0,0,0.6); }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
@@ -19,9 +19,12 @@
         .card { background: #1e293b; border-radius: 20px; padding: 22px; cursor: pointer; transition: 0.3s; border: 1px solid transparent; }
         .card:hover { transform: translateY(-5px); border-color: #00d2ff; }
         .card.active { background: rgba(0, 210, 255, 0.1); border-color: #00d2ff; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
-        .val-row { display: flex; justify-content: space-around; margin-top: 15px; }
+        .val-row { display: flex; justify-content: space-around; margin-top: 15px; flex-wrap: wrap; }
+        .val-item { text-align: center; padding: 5px; }
         .temp-color { color: #ff6384; filter: drop-shadow(0 0 5px #ff6384); }
         .hum-color { color: #36a2eb; filter: drop-shadow(0 0 5px #36a2eb); }
+        .air-color { color: #00ff88; filter: drop-shadow(0 0 5px #00ff88); }
+        .vib-color { color: #ff9f43; filter: drop-shadow(0 0 5px #ff9f43); }
         .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; }
         .chart-wrapper.show { max-height: 500px; opacity: 1; padding-top: 25px; margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         canvas { width: 100% !important; height: 320px !important; }
@@ -46,26 +49,21 @@
     </div>
 
     <script>
-        // 配置感測器清單
+        // --- 1. 配置感測器清單 (加入新感測器類型) ---
         const sensorConfig = {
-            "s01": { name: "1號監測點", icon: "🌡️" },
-            "s02": { name: "2號監測點", icon: "🌬️" },
-            "s03": { name: "3號監測點", icon: "🧪" }
+            "s01": { name: "環境監測", icon: "🌡️", type: "env" },     // 溫濕度
+            "s02": { name: "空氣品質", icon: "🌬️", type: "air" },     // CO2 & VOC
+            "s03": { name: "設備狀態", icon: "🚜", type: "machine" }  // 震動
         };
 
         let currentActiveNode = null;
+        let units = {}; // 用於儲存來自後端的單位對應表
         const ctx = document.getElementById('myChart').getContext('2d');
         
-        // 初始化 Chart.js
+        // --- 2. 初始化 Chart.js ---
         const myChart = new Chart(ctx, {
             type: 'line',
-            data: { 
-                labels: [], 
-                datasets: [
-                    { label: '溫度 (°C)', data: [], borderColor: '#ff6384', backgroundColor: 'rgba(255,99,132,0.1)', fill: true, tension: 0.4 },
-                    { label: '濕度 (%)', data: [], borderColor: '#36a2eb', backgroundColor: 'rgba(54,162,235,0.1)', fill: true, tension: 0.4 }
-                ]
-            },
+            data: { labels: [], datasets: [] }, // dataset 將根據選擇動態生成
             options: { 
                 responsive: true, 
                 maintainAspectRatio: false,
@@ -77,16 +75,28 @@
             }
         });
 
+        // --- 3. 動態建立卡片 ---
         function createCards() {
             const grid = document.getElementById('scada-grid');
             Object.keys(sensorConfig).forEach(id => {
+                const conf = sensorConfig[id];
+                let content = "";
+                
+                // 根據類型產生對應的數值容器
+                if (conf.type === "env") {
+                    content = `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span><small id="${id}-t-unit"></small></h2></div>
+                               <div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span><small id="${id}-h-unit"></small></h2></div>`;
+                } else if (conf.type === "air") {
+                    content = `<div class="val-item"><h2 class="air-color"><span id="${id}-co2">--</span><small id="${id}-co2-unit"></small></h2></div>
+                               <div class="val-item"><h2 class="air-color" style="filter:hue-rotate(45deg)"><span id="${id}-voc">--</span><small id="${id}-voc-unit"></small></h2></div>`;
+                } else if (conf.type === "machine") {
+                    content = `<div class="val-item"><h2 class="vib-color"><span id="${id}-vib">--</span><small id="${id}-vib-unit"></small></h2></div>`;
+                }
+
                 grid.insertAdjacentHTML('beforeend', `
                     <div class="card" id="card-${id}" onclick="toggleChart('${id}')">
-                        <h3 style="margin:0; font-size:1rem; color:#94a3b8">${sensorConfig[id].icon} ${sensorConfig[id].name}</h3>
-                        <div class="val-row">
-                            <h2 class="temp-color"><span id="${id}-t">--</span><small style="font-size:0.8rem">°C</small></h2>
-                            <h2 class="hum-color"><span id="${id}-h">--</span><small style="font-size:0.8rem">%</small></h2>
-                        </div>
+                        <h3 style="margin:0; font-size:1rem; color:#94a3b8">${conf.icon} ${conf.name}</h3>
+                        <div class="val-row">${content}</div>
                     </div>`);
             });
         }
@@ -104,52 +114,68 @@
                 wrapper.classList.add('show');
                 cards.forEach(c => c.classList.remove('active'));
                 document.getElementById(`card-${nodeId}`).classList.add('active');
-                // 切換時立即更新一次圖表
                 fetchData();
             }
         }
 
+        // --- 4. 數據抓取與動態圖表更新 ---
         function fetchData() {
             fetch('/api/all_data')
                 .then(res => res.json())
                 .then(data => {
-                    // 1. 更新卡片即時數據 (加入數據存在檢查)
+                    units = data.units || {}; // 更新單位對照表
+                    
+                    // A. 更新即時數據與單位
                     Object.keys(sensorConfig).forEach(id => {
-                        const tElem = document.getElementById(`${id}-t`);
-                        const hElem = document.getElementById(`${id}-h`);
-                        
-                        // 確保數據存在才更新，避免顯示 undefined
-                        if (data[`${id}_t`]) tElem.innerText = data[`${id}_t`].val;
-                        if (data[`${id}_h`]) hElem.innerText = data[`${id}_h`].val;
+                        const metrics = ["t", "h", "co2", "voc", "vib"];
+                        metrics.forEach(m => {
+                            const valElem = document.getElementById(`${id}-${m}`);
+                            const unitElem = document.getElementById(`${id}-${m}-unit`);
+                            if (valElem && data[`${id}_${m}`]) {
+                                valElem.innerText = data[`${id}_${m}`].val;
+                                if (unitElem && units[m]) unitElem.innerText = units[m];
+                            }
+                        });
                     });
 
-                    // 2. 更新系統狀態燈
+                    // B. 系統狀態燈
                     const isOnline = data.status === 'online';
-                    const statusText = document.getElementById('status-text');
-                    const statusDot = document.getElementById('status-dot');
-                    statusText.innerText = isOnline ? 'SYSTEM ONLINE' : 'SYSTEM OFFLINE';
-                    statusDot.className = `status-dot ${isOnline ? 'online' : 'offline'}`;
+                    document.getElementById('status-text').innerText = isOnline ? 'SYSTEM ONLINE' : 'SYSTEM OFFLINE';
+                    document.getElementById('status-dot').className = `status-dot ${isOnline ? 'online' : 'offline'}`;
 
-                    // 3. 更新圖表數據
+                    // C. 動態切換圖表顯示內容
                     if (currentActiveNode && data.history && data.history[currentActiveNode]) {
                         const h = data.history[currentActiveNode];
+                        const type = sensorConfig[currentActiveNode].type;
                         
-                        // 確保歷史標籤與數據長度同步
                         myChart.data.labels = h.labels || [];
-                        myChart.data.datasets[0].data = h.temp || [];
-                        myChart.data.datasets[1].data = h.hum || [];
-                        
-                        // 'none' 模式可以讓圖表更新更平滑，不重畫動畫
+                        let newDatasets = [];
+
+                        if (type === "env") {
+                            newDatasets = [
+                                { label: `溫度 (${units.t})`, data: h.temp, borderColor: '#ff6384', backgroundColor: 'rgba(255,99,132,0.1)', fill: true, tension: 0.4 },
+                                { label: `濕度 (${units.h})`, data: h.hum, borderColor: '#36a2eb', backgroundColor: 'rgba(54,162,235,0.1)', fill: true, tension: 0.4 }
+                            ];
+                        } else if (type === "air") {
+                            newDatasets = [
+                                { label: `CO2 (${units.co2})`, data: h.co2, borderColor: '#00ff88', backgroundColor: 'rgba(0,255,136,0.1)', fill: true, tension: 0.4 },
+                                { label: `VOC (${units.voc})`, data: h.voc, borderColor: '#7bed9f', backgroundColor: 'rgba(123,237,159,0.1)', fill: true, tension: 0.4 }
+                            ];
+                        } else if (type === "machine") {
+                            newDatasets = [
+                                { label: `震動強度 (${units.vib})`, data: h.vib, borderColor: '#ff9f43', backgroundColor: 'rgba(255,159,67,0.1)', fill: true, tension: 0.4 }
+                            ];
+                        }
+
+                        myChart.data.datasets = newDatasets;
                         myChart.update('none'); 
                     }
-                })
-                .catch(err => console.error("Fetch Error:", err));
+                });
         }
 
-        // 啟動程序
         createCards();
         fetchData();
-        setInterval(fetchData, 3000); // 每 3 秒從雲端同步一次數據
+        setInterval(fetchData, 3000); 
     </script>
 </body>
 </html>

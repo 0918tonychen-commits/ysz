@@ -25,63 +25,51 @@ except Exception as e:
 while True:
     if ser.in_waiting > 0:
         try:
-            # 讀取一行數據並清理
             line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if not line:
-                continue
+            if not line: continue
+            print(f"📡 原始數據: {line}")
 
-            print(f"📡 收到原始數據: {line}")
-
-            # 邏輯 A：檢查是否為標準格式數據
             if "數據:" in line:
-                # 只擷取「數據:」之後的內容
-                # 範例：s02_t,21.5,h,80.3,req_time
                 clean_data = line.split("數據:")[1].strip().lower()
-                parts = clean_data.split(",")
-
-                # 確保封包完整度 (ID, 溫, 標籤, 濕)
-                if len(parts) >= 4:
-                    node_id_base = parts[0].split('_')[0]
-                    temp_val = parts[1]
-                    hum_val = parts[3]
-
+                parts = clean_data.split(",") # 例如: s01_t,25.5,h,60.2,co2,450,req_time
+                
+                if len(parts) >= 2:
+                    node_id_base = parts[0].split('_')[0] # 抓取 s01
+                    
                     # 1. 處理校時請求
                     if "req_time" in clean_data:
-                        # 取得當前電腦精準時間 (例如 TIME:15:05:30)
                         pc_time = time.strftime("TIME:%H:%M:%S")
-                        # 透過序列埠傳回給接收端 Arduino，再由 LoRa 射回給發送端
                         ser.write((pc_time + "\n").encode())
-                        print(f"⏰ 已回應校時請求: {pc_time}")
+                        print(f"⏰ 已回應校時: {pc_time}")
 
-                    # 2. 雲端轉發檢查 (防暴衝)
+                    # 2. 防暴衝檢查
                     now = time.time()
                     if node_id_base in last_update and (now - last_update[node_id_base] < NODE_COOLDOWN):
                         continue
 
-                    # 3. 發送數據至 Render
-                    t_payload = {"id": f"{node_id_base}_t", "val": temp_val}
-                    h_payload = {"id": f"{node_id_base}_h", "val": hum_val}
-
-                    try:
-                        # 設定 5 秒超時，避免網路不穩導致整個 Bridge 卡死
-                        r_t = requests.post(RENDER_URL, json=t_payload, timeout=5)
-                        r_h = requests.post(RENDER_URL, json=h_payload, timeout=5)
-
-                        if r_t.status_code == 200 and r_h.status_code == 200:
-                            print(f"🚀 成功轉發 {node_id_base}：溫 {temp_val} / 濕 {hum_val}")
-                        else:
-                            print(f"❌ 雲端拒絕更新，狀態碼: {r_t.status_code}")
-                    except requests.exceptions.RequestException as req_e:
-                        print(f"🌐 網路連線異常，無法連上 Render: {req_e}")
+                    # 3. 核心修改：自動遍歷所有數據對
+                    # 我們每兩個一組 (ID, 數值) 進行處理
+                    for i in range(0, len(parts) - 1, 2):
+                        sensor_id = parts[i]
+                        sensor_val = parts[i+1]
+                        
+                        # 跳過非數據標籤 (如 req_time)
+                        if "req" in sensor_id or "time" in sensor_id:
+                            continue
+                            
+                        # 如果 ID 沒帶底線 (如單純傳 co2), 自動補上 node_id
+                        final_id = sensor_id if "_" in sensor_id else f"{node_id_base}_{sensor_id}"
+                        
+                        payload = {"id": final_id, "val": sensor_val}
+                        
+                        try:
+                            res = requests.post(RENDER_URL, json=payload, timeout=5)
+                            if res.status_code == 200:
+                                print(f"🚀 成功上傳: {final_id} = {sensor_val}")
+                        except:
+                            print(f"❌ 上傳失敗: {final_id}")
 
                     last_update[node_id_base] = now
-            
-            # 邏輯 B：如果不包含「數據:」但包含其他重要資訊（選用）
-            else:
-                pass 
-
         except Exception as e:
-            print(f"⚠️ 解析發生錯誤: {e}")
-
-    # 稍微休息，避免 100% 佔用 CPU
+            print(f"⚠️ 錯誤: {e}")
     time.sleep(0.01)
