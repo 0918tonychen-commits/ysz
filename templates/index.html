@@ -1,186 +1,660 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LoRa SCADA 智能監控中心</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #0b1016; color: #e2e8f0; margin: 0; padding: 20px; display: flex; justify-content: center; min-height: 100vh; }
-        .container { width: 100%; max-width: 950px; background: rgba(20, 26, 35, 0.85); padding: 30px; border-radius: 28px; border: 1px solid rgba(0, 210, 255, 0.2); backdrop-filter: blur(10px); box-shadow: 0 20px 50px rgba(0,0,0,0.6); }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
-        h1 { color: #00d2ff; font-size: 1.8rem; margin: 0; text-shadow: 0 0 15px rgba(0,210,255,0.5); }
-        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 10px; }
-        .online { background: #00ff88; box-shadow: 0 0 12px #00ff88; animation: pulse 2s infinite; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-        .offline { background: #ff4757; box-shadow: 0 0 10px #ff4757; }
-        .scada-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; }
-        .card { background: #1e293b; border-radius: 20px; padding: 22px; cursor: pointer; transition: 0.3s; border: 1px solid transparent; }
-        .card:hover { transform: translateY(-5px); border-color: #00d2ff; }
-        .card.active { background: rgba(0, 210, 255, 0.1); border-color: #00d2ff; box-shadow: 0 0 20px rgba(0, 210, 255, 0.2); }
-        .val-row { display: flex; justify-content: space-around; margin-top: 15px; flex-wrap: wrap; }
-        .val-item { text-align: center; flex: 1; }
-        .temp-color { color: #ff6384; filter: drop-shadow(0 0 5px #ff6384); }
-        .hum-color { color: #36a2eb; filter: drop-shadow(0 0 5px #36a2eb); }
-        .air-color { color: #00ff88; filter: drop-shadow(0 0 5px #00ff88); }
-        .pm-color { color: #7bed9f; filter: drop-shadow(0 0 5px #7bed9f); }
-        .chart-wrapper { max-height: 0; overflow: hidden; transition: 0.6s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; }
-        .chart-wrapper.show { max-height: 500px; opacity: 1; padding-top: 25px; margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
-        .scroll-container { width: 100%; overflow-x: auto; scroll-behavior: smooth; }
-        .scroll-container::-webkit-scrollbar { height: 6px; }
-        .scroll-container::-webkit-scrollbar-thumb { background: rgba(0, 210, 255, 0.3); border-radius: 10px; }
-        .canvas-holder { height: 320px; min-width: 100%; }
-        canvas { width: 100% !important; height: 100% !important; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LoRa SCADA 智能監控中心</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+ 
+    :root {
+      --bg:        #080c10;
+      --surface:   #0f1720;
+      --surface2:  #1a2535;
+      --border:    rgba(0, 210, 255, 0.12);
+      --border-hover: rgba(0, 210, 255, 0.45);
+      --cyan:      #00d2ff;
+      --cyan-dim:  rgba(0, 210, 255, 0.15);
+      --green:     #00ff88;
+      --red:       #ff6384;
+      --blue:      #36a2eb;
+      --yellow:    #f9ca24;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --radius:    16px;
+    }
+ 
+    body {
+      font-family: 'Courier New', 'Consolas', monospace;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+ 
+    .container {
+      width: 100%;
+      max-width: 980px;
+    }
+ 
+    /* ── Header ── */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 28px;
+      gap: 16px;
+    }
+    .header-left h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--cyan);
+      text-transform: uppercase;
+    }
+    .header-left .subtitle {
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.15em;
+      margin-top: 4px;
+    }
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: 999px;
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      transition: border-color 0.4s;
+      white-space: nowrap;
+    }
+    .status-badge.is-online { border-color: rgba(0,255,136,0.4); color: var(--green); }
+    .status-badge.is-offline { border-color: rgba(255,71,87,0.4); color: #ff4757; }
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+    .dot.pulse { animation: pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+ 
+    /* ── Error toast ── */
+    #error-toast {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 16px;
+      background: rgba(255,71,87,0.12);
+      border: 0.5px solid rgba(255,71,87,0.4);
+      border-radius: 10px;
+      font-size: 0.8rem;
+      color: #ff4757;
+      margin-bottom: 20px;
+    }
+    #error-toast.show { display: flex; }
+    .retry-btn {
+      margin-left: auto;
+      padding: 3px 10px;
+      background: none;
+      border: 0.5px solid rgba(255,71,87,0.5);
+      border-radius: 6px;
+      color: #ff4757;
+      font-size: 0.75rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .retry-btn:hover { background: rgba(255,71,87,0.1); }
+ 
+    /* ── Grid ── */
+    .scada-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+ 
+    /* ── Card ── */
+    .card {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      cursor: pointer;
+      transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: var(--cyan-dim);
+      opacity: 0;
+      transition: opacity 0.25s;
+      pointer-events: none;
+    }
+    .card:hover { transform: translateY(-3px); border-color: var(--border-hover); }
+    .card:hover::before { opacity: 0.4; }
+    .card.active {
+      border-color: var(--cyan);
+      box-shadow: 0 0 24px rgba(0,210,255,0.15);
+    }
+    .card.active::before { opacity: 1; }
+ 
+    .card-title {
+      font-size: 0.78rem;
+      color: var(--muted);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card-title .icon { font-size: 1rem; }
+ 
+    .val-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .val-item {
+      flex: 1;
+      min-width: 60px;
+      text-align: center;
+    }
+    .val-label {
+      font-size: 0.65rem;
+      color: var(--muted);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .val-num {
+      font-size: 1.6rem;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+    .val-unit { font-size: 0.65rem; font-weight: 400; opacity: 0.7; margin-left: 2px; }
+    .c-red    { color: var(--red); }
+    .c-blue   { color: var(--blue); }
+    .c-green  { color: var(--green); }
+    .c-yellow { color: var(--yellow); }
+ 
+    /* CO2 large display */
+    .co2-display {
+      text-align: center;
+      padding-bottom: 14px;
+      margin-bottom: 14px;
+      border-bottom: 0.5px solid var(--border);
+    }
+    .co2-display .val-num { font-size: 2.2rem; }
+ 
+    /* ── Chart Area ── */
+    .chart-panel {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      max-height: 0;
+      opacity: 0;
+      transition: max-height 0.55s cubic-bezier(0.4,0,0.2,1), opacity 0.4s ease, padding 0.4s ease;
+    }
+    .chart-panel.show {
+      max-height: 420px;
+      opacity: 1;
+      padding: 20px;
+    }
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .chart-title {
+      font-size: 0.75rem;
+      color: var(--muted);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .close-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 1rem;
+      cursor: pointer;
+      line-height: 1;
+      padding: 2px 6px;
+      border-radius: 6px;
+      transition: color 0.2s, background 0.2s;
+      font-family: inherit;
+    }
+    .close-btn:hover { color: var(--text); background: var(--surface2); }
+ 
+    .scroll-box {
+      overflow-x: auto;
+      scroll-behavior: smooth;
+    }
+    .scroll-box::-webkit-scrollbar { height: 4px; }
+    .scroll-box::-webkit-scrollbar-thumb { background: rgba(0,210,255,0.25); border-radius: 4px; }
+    .canvas-holder { height: 300px; }
+    canvas { width: 100% !important; height: 100% !important; }
+ 
+    /* ── Footer ── */
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 20px;
+      font-size: 0.7rem;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+    }
+    #last-update { color: var(--muted); }
+ 
+    @media (max-width: 480px) {
+      .header { flex-direction: column; }
+      .val-num { font-size: 1.3rem; }
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>LoRa SCADA 監控系統</h1>
-            <div class="status-tag">
-                <span id="status-dot" class="status-dot offline"></span>
-                <span id="status-text">SYSTEM OFFLINE</span>
-            </div>
-        </div>
-        <div id="scada-grid" class="scada-grid"></div>
-        <div id="chart-area" class="chart-wrapper">
-            <div class="scroll-container" id="scroll-box">
-                <div class="canvas-holder" id="canvas-container">
-                    <canvas id="myChart"></canvas>
-                </div>
-            </div>
-        </div>
-        <p style="text-align:center; color:#475569; margin-top:20px; font-size: 0.9rem;">⚡ 智慧圖表洗牌技術：自動清除配置殘留</p>
+<div class="container">
+ 
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <h1>LoRa SCADA</h1>
+      <div class="subtitle">INTELLIGENT MONITORING CENTER · v2.0</div>
     </div>
-
-    <script>
-        const sensorConfig = {
-            "s01": { name: "1號環境站", icon: "🌡️", type: "env" },
-            "s02": { name: "空氣品質全監測", icon: "🌬️", type: "air_all" },
-            "s03": { name: "懸浮微粒監測", icon: "😷", type: "pm_data" }
-        };
-
-        let currentActiveNode = null;
-        let initialLoadMap = {}; 
-        const ctx = document.getElementById('myChart').getContext('2d');
-        
-        const myChart = new Chart(ctx, {
-            type: 'line',
-            data: { labels: [], datasets: [] },
-            options: { 
-                responsive: true, 
-                maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false },
-                plugins: { legend: { labels: { color: '#94a3b8' } } },
-                scales: {
-                    x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
-                    y: { type: 'linear', display: true, position: 'left', beginAtZero: true, ticks: { color: '#e2e8f0' }, grid: { color: 'rgba(255,255,255,0.05)' } },
-                    y1: { type: 'linear', display: false, position: 'right', beginAtZero: true, ticks: { color: '#00ff88' }, grid: { drawOnChartArea: false } }
-                }
-            }
-        });
-
-        function createCards() {
-            const grid = document.getElementById('scada-grid');
-            Object.keys(sensorConfig).forEach(id => {
-                const conf = sensorConfig[id];
-                let content = (conf.type === "env") ? 
-                    `<div class="val-item"><h2 class="temp-color"><span id="${id}-t">--</span>°C</h2></div><div class="val-item"><h2 class="hum-color"><span id="${id}-h">--</span>%</h2></div>` :
-                    (conf.type === "air_all") ?
-                    `<div style="width:100%; text-align:center; margin-bottom:10px;"><h2 class="air-color"><span id="${id}-co2">--</span><small>ppm</small></h2></div><div class="val-row" style="width:100%; border-top: 1px solid rgba(255,255,255,0.1); padding-top:10px;"><div class="temp-color"><span id="${id}-t">--</span>°C</div><div class="hum-color"><span id="${id}-h">--</span>%</div></div>` :
-                    `<div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM2.5</span><h2 class="pm-color"><span id="${id}-pm25">--</span></h2></div><div class="val-item"><span style="font-size:0.7rem;color:#94a3b8">PM10</span><h2 class="pm-color" style="filter:hue-rotate(45deg)"><span id="${id}-pm10">--</span></h2></div>`;
-
-                grid.insertAdjacentHTML('beforeend', `<div class="card" id="card-${id}" onclick="toggleChart('${id}')"><h3 style="margin:0; font-size:1rem; color:#94a3b8">${conf.icon} ${conf.name}</h3><div class="val-row">${content}</div></div>`);
-            });
-        }
-
-        function toggleChart(nodeId) {
-            const wrapper = document.getElementById('chart-area');
-            const cards = document.querySelectorAll('.card');
-            if (currentActiveNode === nodeId) {
-                currentActiveNode = null;
-                wrapper.classList.remove('show');
-                cards.forEach(c => c.classList.remove('active'));
-            } else {
-                initialLoadMap[nodeId] = false; 
-                currentActiveNode = nodeId;
-                wrapper.classList.add('show');
-                cards.forEach(c => c.classList.remove('active'));
-                document.getElementById(`card-${nodeId}`).classList.add('active');
-                fetchData();
-            }
-        }
-
-        function fetchData() {
-            fetch('/api/all_data')
-                .then(res => res.json())
-                .then(data => {
-                    Object.keys(sensorConfig).forEach(id => {
-                        ["t", "h", "co2", "voc", "vib", "pm25", "pm10", "c"].forEach(m => {
-                            const valElem = document.getElementById(`${id}-${m === 'c' ? 'co2' : m}`);
-                            if (valElem && data[`${id}_${m}`]) valElem.innerText = data[`${id}_${m}`].val;
-                        });
-                    });
-
-                    const isOnline = data.status === 'online';
-                    document.getElementById('status-text').innerText = isOnline ? 'SYSTEM ONLINE' : 'SYSTEM OFFLINE';
-                    document.getElementById('status-dot').className = `status-dot ${isOnline ? 'online' : 'offline'}`;
-
-                    if (currentActiveNode && data.history && data.history[currentActiveNode]) {
-                        const h = data.history[currentActiveNode];
-                        const type = sensorConfig[currentActiveNode].type;
-                        let isFirstLoad = !initialLoadMap[currentActiveNode];
-                        initialLoadMap[currentActiveNode] = true;
-
-                        // 1. 徹底重置圖表狀態
-                        myChart.options.animation = isFirstLoad ? { duration: 1000 } : false;
-                        myChart.options.transitions = isFirstLoad ? {} : { active: { animation: { duration: 0 } } };
-                        myChart.data.datasets = []; // 強制清空畫布防止殘留
-                        myChart.options.scales.y1.display = (type === "air_all");
-
-                        // 2. 寬度計算
-                        const containerWidth = document.getElementById('scroll-box').clientWidth;
-                        document.getElementById('canvas-container').style.width = Math.max(containerWidth, h.labels.length * 60) + 'px';
-
-                        // 3. 根據類型重新定義 Dataset 與 Y 軸
-                        if (type === "pm_data") {
-                            myChart.options.scales.y.suggestedMax = 100;
-                            myChart.options.scales.y.title.text = "濃度 (μg/m³)";
-                            myChart.data.datasets = [
-                                { label: `PM2.5`, data: (h.pm25||[]).map(Number), borderColor: '#00ff88', yAxisID: 'y', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
-                                { label: `PM10`, data: (h.pm10||[]).map(Number), borderColor: '#7bed9f', yAxisID: 'y', tension: 0.4 }
-                            ];
-                        } else if (type === "air_all") {
-                            myChart.options.scales.y.suggestedMax = 100;
-                            myChart.options.scales.y1.suggestedMax = 1500;
-                            myChart.options.scales.y.title.text = "溫濕度";
-                            myChart.data.datasets = [
-                                { label: `CO2 (ppm)`, data: (h.co2||h.c||[]).map(Number), borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.1)' },
-                                { label: `溫度`, data: (h.temp||[]).map(Number), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
-                                { label: `濕度`, data: (h.hum||[]).map(Number), borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
-                            ];
-                        } else {
-                            myChart.options.scales.y.suggestedMax = 100;
-                            myChart.options.scales.y.title.text = "溫濕度";
-                            myChart.data.datasets = [
-                                { label: `溫度`, data: (h.temp||[]).map(Number), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
-                                { label: `濕度`, data: (h.hum||[]).map(Number), borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
-                            ];
-                        }
-
-                        myChart.data.labels = h.labels || [];
-                        myChart.update(isFirstLoad ? 'default' : 'none'); 
-
-                        const scrollBox = document.getElementById('scroll-box');
-                        if (isFirstLoad || (scrollBox.scrollLeft + scrollBox.clientWidth >= scrollBox.scrollWidth - 120)) {
-                            setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 50);
-                        }
-                    }
-                });
-        }
-        createCards();
-        fetchData();
-        setInterval(fetchData, 3000); 
-    </script>
+    <div id="status-badge" class="status-badge is-offline">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">OFFLINE</span>
+    </div>
+  </div>
+ 
+  <!-- Error toast -->
+  <div id="error-toast">
+    <span>⚠ 無法連線至後端 API</span>
+    <button class="retry-btn" onclick="manualRetry()">重試</button>
+  </div>
+ 
+  <!-- Sensor cards -->
+  <div id="scada-grid" class="scada-grid"></div>
+ 
+  <!-- Chart panel -->
+  <div id="chart-panel" class="chart-panel">
+    <div class="chart-header">
+      <span class="chart-title" id="chart-title">歷史趨勢</span>
+      <button class="close-btn" onclick="closeChart()">✕</button>
+    </div>
+    <div class="scroll-box" id="scroll-box">
+      <div class="canvas-holder" id="canvas-holder">
+        <canvas id="myChart"></canvas>
+      </div>
+    </div>
+  </div>
+ 
+  <!-- Footer -->
+  <div class="footer">
+    <span>⚡ LoRa SCADA · 自動輪詢 3s</span>
+    <span id="last-update">—</span>
+  </div>
+ 
+</div>
+ 
+<script>
+// ────────────────────────────────────────────
+// 設定
+// ────────────────────────────────────────────
+const SENSOR_CONFIG = {
+  s01: { name: '1號環境站',    icon: '🌡️', type: 'env' },
+  s02: { name: '空氣品質全監測', icon: '🌬️', type: 'air_all' },
+  s03: { name: '懸浮微粒監測',  icon: '😷', type: 'pm_data' },
+};
+const POLL_INTERVAL = 3000;
+ 
+// ────────────────────────────────────────────
+// 狀態
+// ────────────────────────────────────────────
+let activeNode      = null;   // 當前展開的節點 id
+let isFirstRender   = true;   // 該節點是否首次繪圖
+let fetchTimer      = null;   // setInterval handle
+let isFetching      = false;  // 防止 overlapping requests
+let retryCount      = 0;
+ 
+// ────────────────────────────────────────────
+// Chart 初始化
+// ────────────────────────────────────────────
+const ctx = document.getElementById('myChart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: { labels: [], datasets: [] },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 800 },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: {
+        labels: { color: '#94a3b8', font: { family: 'Courier New', size: 11 } }
+      },
+      tooltip: {
+        backgroundColor: '#0f1720',
+        borderColor: 'rgba(0,210,255,0.3)',
+        borderWidth: 0.5,
+        titleColor: '#00d2ff',
+        bodyColor: '#e2e8f0',
+      }
+    },
+    scales: {
+      x: {
+        ticks: { color: '#64748b', font: { size: 10 }, maxTicksLimit: 10 },
+        grid: { display: false },
+      },
+      y: {
+        type: 'linear', position: 'left', beginAtZero: false,
+        ticks: { color: '#e2e8f0', font: { size: 11 } },
+        grid: { color: 'rgba(255,255,255,0.04)' },
+        title: { display: true, color: '#64748b', font: { size: 10 }, text: '' },
+      },
+      y1: {
+        type: 'linear', position: 'right', beginAtZero: true,
+        display: false,
+        ticks: { color: '#00ff88', font: { size: 11 } },
+        grid: { drawOnChartArea: false },
+        title: { display: false, color: '#64748b', font: { size: 10 }, text: 'CO₂ (ppm)' },
+      },
+    },
+  },
+});
+ 
+// ────────────────────────────────────────────
+// 建立感測器卡片
+// ────────────────────────────────────────────
+function buildCard(id, conf) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.id = `card-${id}`;
+  el.setAttribute('role', 'button');
+  el.setAttribute('aria-label', `${conf.name} 展開圖表`);
+  el.onclick = () => toggleChart(id);
+  el.innerHTML = `
+    <div class="card-title">
+      <span class="icon">${conf.icon}</span>
+      ${conf.name}
+    </div>
+    ${cardBody(id, conf.type)}
+  `;
+  return el;
+}
+ 
+function cardBody(id, type) {
+  if (type === 'env') {
+    return `
+      <div class="val-row">
+        <div class="val-item">
+          <div class="val-label">溫度</div>
+          <div class="val-num c-red"><span id="${id}-t">--</span><span class="val-unit">°C</span></div>
+        </div>
+        <div class="val-item">
+          <div class="val-label">濕度</div>
+          <div class="val-num c-blue"><span id="${id}-h">--</span><span class="val-unit">%</span></div>
+        </div>
+      </div>`;
+  }
+  if (type === 'air_all') {
+    return `
+      <div class="co2-display">
+        <div class="val-label">CO₂</div>
+        <div class="val-num c-green"><span id="${id}-co2">--</span><span class="val-unit">ppm</span></div>
+      </div>
+      <div class="val-row">
+        <div class="val-item">
+          <div class="val-label">溫度</div>
+          <div class="val-num c-red"><span id="${id}-t">--</span><span class="val-unit">°C</span></div>
+        </div>
+        <div class="val-item">
+          <div class="val-label">濕度</div>
+          <div class="val-num c-blue"><span id="${id}-h">--</span><span class="val-unit">%</span></div>
+        </div>
+      </div>`;
+  }
+  // pm_data
+  return `
+    <div class="val-row">
+      <div class="val-item">
+        <div class="val-label">PM2.5</div>
+        <div class="val-num c-green"><span id="${id}-pm25">--</span><span class="val-unit">μg/m³</span></div>
+      </div>
+      <div class="val-item">
+        <div class="val-label">PM10</div>
+        <div class="val-num c-yellow"><span id="${id}-pm10">--</span><span class="val-unit">μg/m³</span></div>
+      </div>
+    </div>`;
+}
+ 
+function initCards() {
+  const grid = document.getElementById('scada-grid');
+  Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
+    grid.appendChild(buildCard(id, conf));
+  });
+}
+ 
+// ────────────────────────────────────────────
+// 更新卡片數值
+// ────────────────────────────────────────────
+function updateCardValues(data) {
+  const FIELDS = {
+    env:     ['t','h'],
+    air_all: ['t','h','co2'],
+    pm_data: ['pm25','pm10'],
+  };
+  Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
+    FIELDS[conf.type].forEach(field => {
+      const el = document.getElementById(`${id}-${field}`);
+      if (!el) return;
+      // API key: s01_t / s01_co2 / s02_c (CO2 別名相容)
+      const key = (field === 'co2')
+        ? (data[`${id}_co2`] || data[`${id}_c`])
+        : data[`${id}_${field}`];
+      if (key?.val !== undefined) el.textContent = key.val;
+    });
+  });
+}
+ 
+// ────────────────────────────────────────────
+// 更新系統狀態
+// ────────────────────────────────────────────
+function updateStatus(isOnline) {
+  const badge = document.getElementById('status-badge');
+  const dot   = document.getElementById('status-dot');
+  const txt   = document.getElementById('status-text');
+  badge.className = `status-badge ${isOnline ? 'is-online' : 'is-offline'}`;
+  dot.className   = `dot ${isOnline ? 'pulse' : ''}`;
+  txt.textContent = isOnline ? 'ONLINE' : 'OFFLINE';
+}
+ 
+// ────────────────────────────────────────────
+// 更新圖表
+// ────────────────────────────────────────────
+function buildDatasets(type, h) {
+  if (type === 'pm_data') {
+    chart.options.scales.y.title.text = '濃度 (μg/m³)';
+    chart.options.scales.y.suggestedMax = 100;
+    chart.options.scales.y1.display = false;
+    return [
+      { label: 'PM2.5', data: toNumbers(h.pm25), borderColor: '#00ff88', yAxisID: 'y', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.06)', pointRadius: 2 },
+      { label: 'PM10',  data: toNumbers(h.pm10), borderColor: '#f9ca24', yAxisID: 'y', tension: 0.4, pointRadius: 2 },
+    ];
+  }
+  if (type === 'air_all') {
+    chart.options.scales.y.title.text  = '溫濕度';
+    chart.options.scales.y.suggestedMax = 100;
+    chart.options.scales.y1.display    = true;
+    chart.options.scales.y1.suggestedMax = 1500;
+    return [
+      { label: 'CO₂ (ppm)', data: toNumbers(h.co2 ?? h.c), borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.06)', pointRadius: 2 },
+      { label: '溫度 (°C)',  data: toNumbers(h.temp),       borderColor: '#ff6384', yAxisID: 'y',  tension: 0.4, pointRadius: 2 },
+      { label: '濕度 (%)',   data: toNumbers(h.hum),        borderColor: '#36a2eb', yAxisID: 'y',  tension: 0.4, pointRadius: 2 },
+    ];
+  }
+  // env
+  chart.options.scales.y.title.text = '溫濕度';
+  chart.options.scales.y.suggestedMax = 100;
+  chart.options.scales.y1.display = false;
+  return [
+    { label: '溫度 (°C)', data: toNumbers(h.temp), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4, pointRadius: 2 },
+    { label: '濕度 (%)',  data: toNumbers(h.hum),  borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4, pointRadius: 2 },
+  ];
+}
+ 
+function updateChart(nodeId, h) {
+  const type      = SENSOR_CONFIG[nodeId].type;
+  const firstLoad = isFirstRender;
+  isFirstRender   = false;
+ 
+  // 計算 canvas 動態寬度
+  const scrollBox      = document.getElementById('scroll-box');
+  const minWidth       = Math.max(scrollBox.clientWidth, (h.labels?.length ?? 0) * 55);
+  document.getElementById('canvas-holder').style.width = minWidth + 'px';
+ 
+  // 重建 datasets（避免殘留舊數據）
+  chart.data.labels   = h.labels ?? [];
+  chart.data.datasets = buildDatasets(type, h);
+ 
+  // 動畫：首次顯示才啟用
+  chart.options.animation = firstLoad ? { duration: 800 } : false;
+  chart.update(firstLoad ? 'default' : 'none');
+ 
+  // 自動捲到最右
+  if (firstLoad || scrollBox.scrollLeft + scrollBox.clientWidth >= scrollBox.scrollWidth - 100) {
+    setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 60);
+  }
+}
+ 
+// ────────────────────────────────────────────
+// Fetch 資料
+// ────────────────────────────────────────────
+async function fetchData() {
+  if (isFetching) return;
+  isFetching = true;
+  try {
+    const res  = await fetch('/api/all_data');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+ 
+    hideError();
+    retryCount = 0;
+    updateStatus(data.status === 'online');
+    updateCardValues(data);
+ 
+    if (activeNode && data.history?.[activeNode]) {
+      updateChart(activeNode, data.history[activeNode]);
+    }
+ 
+    // 更新時間戳
+    const now = new Date();
+    document.getElementById('last-update').textContent =
+      `LAST UPDATE ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+ 
+  } catch (err) {
+    retryCount++;
+    updateStatus(false);
+    showError(err.message);
+    console.warn('[SCADA] fetch error:', err);
+  } finally {
+    isFetching = false;
+  }
+}
+ 
+// ────────────────────────────────────────────
+// 錯誤提示
+// ────────────────────────────────────────────
+function showError(msg) {
+  const el = document.getElementById('error-toast');
+  el.querySelector('span').textContent = `⚠ 無法連線：${msg}`;
+  el.classList.add('show');
+}
+function hideError() {
+  document.getElementById('error-toast').classList.remove('show');
+}
+function manualRetry() {
+  hideError();
+  fetchData();
+}
+ 
+// ────────────────────────────────────────────
+// 圖表開關
+// ────────────────────────────────────────────
+function toggleChart(nodeId) {
+  const panel = document.getElementById('chart-panel');
+ 
+  if (activeNode === nodeId) {
+    closeChart();
+    return;
+  }
+ 
+  // 切換節點
+  activeNode    = nodeId;
+  isFirstRender = true;
+ 
+  // 更新卡片樣式
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+  document.getElementById(`card-${nodeId}`).classList.add('active');
+ 
+  // 更新圖表標題
+  document.getElementById('chart-title').textContent =
+    `${SENSOR_CONFIG[nodeId].icon} ${SENSOR_CONFIG[nodeId].name} · 歷史趨勢`;
+ 
+  panel.classList.add('show');
+  fetchData(); // 立刻拉一次
+}
+ 
+function closeChart() {
+  activeNode = null;
+  document.getElementById('chart-panel').classList.remove('show');
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+}
+ 
+// ────────────────────────────────────────────
+// 輪詢管理
+// ────────────────────────────────────────────
+function startPolling() {
+  stopPolling();
+  fetchTimer = setInterval(fetchData, POLL_INTERVAL);
+}
+function stopPolling() {
+  if (fetchTimer) { clearInterval(fetchTimer); fetchTimer = null; }
+}
+ 
+// 頁面隱藏時暫停，回來時恢復（省資源）
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopPolling();
+  else { fetchData(); startPolling(); }
+});
+ 
+// ────────────────────────────────────────────
+// 工具函式
+// ────────────────────────────────────────────
+function toNumbers(arr) {
+  return (arr ?? []).map(Number);
+}
+ 
+// ────────────────────────────────────────────
+// 啟動
+// ────────────────────────────────────────────
+initCards();
+fetchData();
+startPolling();
+</script>
 </body>
 </html>
