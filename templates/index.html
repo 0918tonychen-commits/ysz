@@ -6,7 +6,7 @@
   <title>LoRa SCADA 智能監控中心</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    /* ── 完整 CSS 恢復：包含所有變數與動畫 ── */
+    /* ── 完整 CSS 恢復 ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
@@ -43,7 +43,6 @@
       justify-content: space-between;
       align-items: flex-start;
       margin-bottom: 28px;
-      gap: 16px;
     }
     .header-left h1 {
       font-size: 1.5rem;
@@ -68,7 +67,6 @@
       border: 0.5px solid var(--border);
       border-radius: 999px;
       font-size: 0.72rem;
-      letter-spacing: 0.12em;
     }
     .status-badge.is-online { border-color: rgba(0,255,136,0.4); color: var(--green); }
     .status-badge.is-offline { border-color: rgba(255,71,87,0.4); color: #ff4757; }
@@ -92,7 +90,6 @@
       cursor: pointer;
       transition: transform 0.25s ease, border-color 0.25s ease;
       position: relative;
-      overflow: hidden;
     }
     .card:hover { transform: translateY(-3px); border-color: var(--border-hover); }
     .card.active { border-color: var(--cyan); box-shadow: 0 0 24px rgba(0,210,255,0.15); }
@@ -129,6 +126,7 @@
       opacity: 0;
       overflow: hidden;
       transition: max-height 0.5s ease, opacity 0.4s ease;
+      margin-top: 16px;
     }
     .chart-panel.show { max-height: 500px; opacity: 1; padding: 20px; border-color: var(--cyan); }
 
@@ -140,18 +138,9 @@
       padding: 5px 12px;
       border-radius: 6px;
       cursor: pointer;
-      font-size: 0.8rem;
-    }
-    .close-btn:hover { color: var(--text); }
-
-    .footer {
-      display: flex;
-      justify-content: space-between;
-      margin-top: 20px;
-      font-size: 0.7rem;
-      color: var(--muted);
     }
 
+    .footer { display: flex; justify-content: space-between; margin-top: 20px; font-size: 0.7rem; color: var(--muted); }
     .c-red { color: var(--red); }
     .c-blue { color: var(--blue); }
     .c-green { color: var(--green); }
@@ -182,9 +171,7 @@
         <button class="close-btn" onclick="closeChart()">✕</button>
       </div>
     </div>
-    <div style="height:300px; width:100%;">
-      <canvas id="myChart"></canvas>
-    </div>
+    <div style="height:300px; width:100%;"><canvas id="myChart"></canvas></div>
   </div>
 
   <div class="footer">
@@ -196,9 +183,10 @@
 
 <script>
 // ────────────────────────────────────────────
-// 1. 設定與狀態
+// 1. 設定 (把 s01 加回來了！)
 // ────────────────────────────────────────────
 const SENSOR_CONFIG = {
+  s01: { name: '1號環境站',    icon: '🌡️', type: 'env' },
   s02: { name: '空氣品質全監測', icon: '🌬️', type: 'air_all' },
   s03: { name: '懸浮微粒監測',  icon: '😷', type: 'pm_data' },
 };
@@ -207,7 +195,7 @@ let activeNode = null;
 let isFetching = false;
 
 // ────────────────────────────────────────────
-// 2. Chart.js 初始化 (恢復雙 Y 軸設定)
+// 2. Chart 初始化
 // ────────────────────────────────────────────
 const ctx = document.getElementById('myChart').getContext('2d');
 const chart = new Chart(ctx, {
@@ -226,7 +214,7 @@ const chart = new Chart(ctx, {
 });
 
 // ────────────────────────────────────────────
-// 3. 介面渲染
+// 3. 介面初始化與更新
 // ────────────────────────────────────────────
 function initCards() {
   const grid = document.getElementById('scada-grid');
@@ -238,81 +226,63 @@ function initCards() {
     
     let body = '';
     if (conf.type === 'air_all') {
-      body = `
-        <div class="co2-display">
-          <div class="val-label">CO₂</div>
-          <div class="val-num c-green"><span id="${id}-co2">--</span><span class="val-unit">ppm</span></div>
-        </div>
-        <div class="val-row">
-          <div class="val-item">
-            <div class="val-label">溫度</div>
-            <div class="val-num c-red"><span id="${id}-t">--</span><span class="val-unit">°C</span></div>
-          </div>
-          <div class="val-item">
-            <div class="val-label">濕度</div>
-            <div class="val-num c-blue"><span id="${id}-h">--</span><span class="val-unit">%</span></div>
-          </div>
-        </div>`;
+      body = `<div class="co2-display"><div class="val-label">CO₂</div><div class="val-num c-green"><span id="${id}-co2">--</span><span class="val-unit">ppm</span></div></div>
+              <div class="val-row"><div class="val-item"><div class="val-label">溫度</div><div class="val-num c-red"><span id="${id}-t">--</span><span class="val-unit">°C</span></div></div>
+              <div class="val-item"><div class="val-label">濕度</div><div class="val-num c-blue"><span id="${id}-h">--</span><span class="val-unit">%</span></div></div></div>`;
+    } else if (conf.type === 'env') {
+      body = `<div class="val-row"><div class="val-item"><div class="val-label">溫度</div><div class="val-num c-red"><span id="${id}-t">--</span><span class="val-unit">°C</span></div></div>
+              <div class="val-item"><div class="val-label">濕度</div><div class="val-num c-blue"><span id="${id}-h">--</span><span class="val-unit">%</span></div></div></div>`;
     } else {
-      body = `
-        <div class="val-row">
-          <div class="val-item">
-            <div class="val-label">PM2.5</div>
-            <div class="val-num c-green"><span id="${id}-pm25">--</span><span class="val-unit">μg/m³</span></div>
-          </div>
-          <div class="val-item">
-            <div class="val-label">PM10</div>
-            <div class="val-num c-yellow"><span id="${id}-pm10">--</span><span class="val-unit">μg/m³</span></div>
-          </div>
-        </div>`;
+      body = `<div class="val-row"><div class="val-item"><div class="val-label">PM2.5</div><div class="val-num c-green"><span id="${id}-pm25">--</span><span class="val-unit">μg/m³</span></div></div>
+              <div class="val-item"><div class="val-label">PM10</div><div class="val-num c-yellow"><span id="${id}-pm10">--</span><span class="val-unit">μg/m³</span></div></div></div>`;
     }
-
     card.innerHTML = `<div class="card-title"><span>${conf.icon}</span>${conf.name}</div>${body}`;
     grid.appendChild(card);
   });
 }
 
 function updateUI(data) {
-  // 更新即時數值
   Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
     if (conf.type === 'air_all') {
-      document.getElementById(`${id}-co2`).textContent = data[`${id}_c`]?.val || '--';
-      document.getElementById(`${id}-t`).textContent   = data[`${id}_t`]?.val || '--';
-      document.getElementById(`${id}-h`).textContent   = data[`${id}_h`]?.val || '--';
+      document.getElementById(`${id}-co2`).textContent = data[`${id}_c`]?.val || data[`${id}_co2`]?.val || '--';
+      document.getElementById(`${id}-t`).textContent = data[`${id}_t`]?.val || '--';
+      document.getElementById(`${id}-h`).textContent = data[`${id}_h`]?.val || '--';
+    } else if (conf.type === 'env') {
+      document.getElementById(`${id}-t`).textContent = data[`${id}_t`]?.val || '--';
+      document.getElementById(`${id}-h`).textContent = data[`${id}_h`]?.val || '--';
     } else {
       document.getElementById(`${id}-pm25`).textContent = data[`${id}_pm25`]?.val || '--';
       document.getElementById(`${id}-pm10`).textContent = data[`${id}_pm10`]?.val || '--';
     }
   });
-
-  // 更新系統狀態
   const isOnline = data.status === 'online';
   document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : 'is-offline'}`;
   document.getElementById('status-dot').className = `dot ${isOnline ? 'pulse' : ''}`;
   document.getElementById('status-text').textContent = isOnline ? 'ONLINE' : 'OFFLINE';
   document.getElementById('last-update').textContent = `LAST UPDATE ${new Date().toLocaleTimeString()}`;
-
-  // 如果圖表開著，同步更新
-  if (activeNode && data.history[activeNode]) {
-    renderChart(activeNode, data.history[activeNode]);
-  }
+  if (activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
 }
 
 // ────────────────────────────────────────────
-// 4. 圖表繪製與 CSV 邏輯 (包含 toNumbers 修復)
+// 4. 圖表繪製與工具
 // ────────────────────────────────────────────
 function toNumbers(arr) { return (arr ?? []).map(Number); }
 
 function renderChart(id, h) {
   chart.data.labels = h.labels;
   const conf = SENSOR_CONFIG[id];
-
   if (conf.type === 'air_all') {
     chart.options.scales.y1.display = true;
     chart.data.datasets = [
       { label: 'CO2 (ppm)', data: toNumbers(h.co2), borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4 },
       { label: '溫度 (°C)',  data: toNumbers(h.temp), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4 },
       { label: '濕度 (%)',   data: toNumbers(h.hum),  borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4 }
+    ];
+  } else if (conf.type === 'env') {
+    chart.options.scales.y1.display = false;
+    chart.data.datasets = [
+      { label: '溫度 (°C)', data: toNumbers(h.temp), borderColor: '#ff6384', tension: 0.4 },
+      { label: '濕度 (%)',  data: toNumbers(h.hum),  borderColor: '#36a2eb', tension: 0.4 }
     ];
   } else {
     chart.options.scales.y1.display = false;
@@ -337,24 +307,17 @@ function exportCSV() {
     }
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${activeNode}_data_${new Date().getTime()}.csv`; a.click();
+    const a = document.createElement('a'); a.href = url; a.download = `${activeNode}_data.csv`; a.click();
   });
 }
 
 // ────────────────────────────────────────────
-// 5. 輪詢與控制器
+// 5. 控制與輪詢
 // ────────────────────────────────────────────
 async function fetchData() {
-  if (isFetching) return;
-  isFetching = true;
-  try {
-    const res = await fetch('/api/all_data');
-    const data = await res.json();
-    updateUI(data);
-  } catch (err) {
-    console.error("Fetch Error:", err);
-  } finally { isFetching = false; }
+  if (isFetching) return; isFetching = true;
+  try { const res = await fetch('/api/all_data'); const data = await res.json(); updateUI(data); } 
+  catch (err) { console.error(err); } finally { isFetching = false; }
 }
 
 function toggleChart(id) {
@@ -366,11 +329,7 @@ function toggleChart(id) {
   fetchData();
 }
 
-function closeChart() {
-  activeNode = null;
-  document.getElementById('chart-panel').classList.remove('show');
-  document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
-}
+function closeChart() { activeNode = null; document.getElementById('chart-panel').classList.remove('show'); document.querySelectorAll('.card').forEach(c => c.classList.remove('active')); }
 
 initCards();
 fetchData();
