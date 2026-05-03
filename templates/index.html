@@ -328,10 +328,10 @@ const POLL_INTERVAL = 3000;
 // ────────────────────────────────────────────
 // 狀態
 // ────────────────────────────────────────────
-let activeNode      = null;   // 當前展開的節點 id
-let isFirstRender   = true;   // 該節點是否首次繪圖
-let fetchTimer      = null;   // setInterval handle
-let isFetching      = false;  // 防止 overlapping requests
+let activeNode      = null;   
+let isFirstRender   = true;   
+let fetchTimer      = null;   
+let isFetching      = false;  
 let retryCount      = 0;
 
 // ────────────────────────────────────────────
@@ -381,14 +381,12 @@ const chart = new Chart(ctx, {
 });
 
 // ────────────────────────────────────────────
-// 建立感測器卡片
+// 建立卡片
 // ────────────────────────────────────────────
 function buildCard(id, conf) {
   const el = document.createElement('div');
   el.className = 'card';
   el.id = `card-${id}`;
-  el.setAttribute('role', 'button');
-  el.setAttribute('aria-label', `${conf.name} 展開圖表`);
   el.onclick = () => toggleChart(id);
   el.innerHTML = `
     <div class="card-title">
@@ -431,7 +429,6 @@ function cardBody(id, type) {
         </div>
       </div>`;
   }
-  // pm_data
   return `
     <div class="val-row">
       <div class="val-item">
@@ -453,7 +450,7 @@ function initCards() {
 }
 
 // ────────────────────────────────────────────
-// 更新卡片數值
+// 更新數據
 // ────────────────────────────────────────────
 function updateCardValues(data) {
   const FIELDS = {
@@ -465,18 +462,14 @@ function updateCardValues(data) {
     FIELDS[conf.type].forEach(field => {
       const el = document.getElementById(`${id}-${field}`);
       if (!el) return;
-      // API key: s01_t / s01_co2 / s02_c (CO2 別名相容)
       const key = (field === 'co2')
-        ? (data[`${id}_co2`] || data[`${id}_c`])
+        ? (data[`${id}_co2`] || data[`${id}_c` || data[`${id}_co2`]])
         : data[`${id}_${field}`];
       if (key?.val !== undefined) el.textContent = key.val;
     });
   });
 }
 
-// ────────────────────────────────────────────
-// 更新系統狀態
-// ────────────────────────────────────────────
 function updateStatus(isOnline) {
   const badge = document.getElementById('status-badge');
   const dot   = document.getElementById('status-dot');
@@ -487,12 +480,11 @@ function updateStatus(isOnline) {
 }
 
 // ────────────────────────────────────────────
-// 更新圖表
+// 圖表核心邏輯
 // ────────────────────────────────────────────
 function buildDatasets(type, h) {
   if (type === 'pm_data') {
     chart.options.scales.y.title.text = '濃度 (μg/m³)';
-    chart.options.scales.y.suggestedMax = 100;
     chart.options.scales.y1.display = false;
     return [
       { label: 'PM2.5', data: toNumbers(h.pm25), borderColor: '#00ff88', yAxisID: 'y', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.06)', pointRadius: 2 },
@@ -501,18 +493,14 @@ function buildDatasets(type, h) {
   }
   if (type === 'air_all') {
     chart.options.scales.y.title.text  = '溫濕度';
-    chart.options.scales.y.suggestedMax = 100;
     chart.options.scales.y1.display    = true;
-    chart.options.scales.y1.suggestedMax = 1500;
     return [
       { label: 'CO₂ (ppm)', data: toNumbers(h.co2 ?? h.c), borderColor: '#00ff88', yAxisID: 'y1', tension: 0.4, fill: true, backgroundColor: 'rgba(0,255,136,0.06)', pointRadius: 2 },
       { label: '溫度 (°C)',  data: toNumbers(h.temp),       borderColor: '#ff6384', yAxisID: 'y',  tension: 0.4, pointRadius: 2 },
       { label: '濕度 (%)',   data: toNumbers(h.hum),        borderColor: '#36a2eb', yAxisID: 'y',  tension: 0.4, pointRadius: 2 },
     ];
   }
-  // env
   chart.options.scales.y.title.text = '溫濕度';
-  chart.options.scales.y.suggestedMax = 100;
   chart.options.scales.y1.display = false;
   return [
     { label: '溫度 (°C)', data: toNumbers(h.temp), borderColor: '#ff6384', yAxisID: 'y', tension: 0.4, pointRadius: 2 },
@@ -525,63 +513,45 @@ function updateChart(nodeId, h) {
   const firstLoad = isFirstRender;
   isFirstRender   = false;
 
-  // 計算 canvas 動態寬度
   const scrollBox      = document.getElementById('scroll-box');
   const minWidth       = Math.max(scrollBox.clientWidth, (h.labels?.length ?? 0) * 55);
   document.getElementById('canvas-holder').style.width = minWidth + 'px';
 
-  // 重建 datasets（避免殘留舊數據）
   chart.data.labels   = h.labels ?? [];
   chart.data.datasets = buildDatasets(type, h);
 
-  // 動畫：首次顯示才啟用
   chart.options.animation = firstLoad ? { duration: 800 } : false;
   chart.update(firstLoad ? 'default' : 'none');
 
-  // 自動捲到最右
   if (firstLoad || scrollBox.scrollLeft + scrollBox.clientWidth >= scrollBox.scrollWidth - 100) {
     setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 60);
   }
 }
 
 // ────────────────────────────────────────────
-// Fetch 資料
+// API 交互
 // ────────────────────────────────────────────
 async function fetchData() {
   if (isFetching) return;
   isFetching = true;
   try {
     const res  = await fetch('/api/all_data');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-
     hideError();
-    retryCount = 0;
     updateStatus(data.status === 'online');
     updateCardValues(data);
-
     if (activeNode && data.history?.[activeNode]) {
       updateChart(activeNode, data.history[activeNode]);
     }
-
-    // 更新時間戳
-    const now = new Date();
-    document.getElementById('last-update').textContent =
-      `LAST UPDATE ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
-
+    document.getElementById('last-update').textContent = `LAST UPDATE ${new Date().toLocaleTimeString()}`;
   } catch (err) {
-    retryCount++;
     updateStatus(false);
     showError(err.message);
-    console.warn('[SCADA] fetch error:', err);
   } finally {
     isFetching = false;
   }
 }
 
-// ────────────────────────────────────────────
-// 錯誤提示
-// ────────────────────────────────────────────
 function showError(msg) {
   const el = document.getElementById('error-toast');
   el.querySelector('span').textContent = `⚠ 無法連線：${msg}`;
@@ -590,36 +560,18 @@ function showError(msg) {
 function hideError() {
   document.getElementById('error-toast').classList.remove('show');
 }
-function manualRetry() {
-  hideError();
-  fetchData();
-}
+function manualRetry() { fetchData(); }
 
-// ────────────────────────────────────────────
-// 圖表開關
-// ────────────────────────────────────────────
 function toggleChart(nodeId) {
   const panel = document.getElementById('chart-panel');
-
-  if (activeNode === nodeId) {
-    closeChart();
-    return;
-  }
-
-  // 切換節點
+  if (activeNode === nodeId) { closeChart(); return; }
   activeNode    = nodeId;
   isFirstRender = true;
-
-  // 更新卡片樣式
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
   document.getElementById(`card-${nodeId}`).classList.add('active');
-
-  // 更新圖表標題
-  document.getElementById('chart-title').textContent =
-    `${SENSOR_CONFIG[nodeId].icon} ${SENSOR_CONFIG[nodeId].name} · 歷史趨勢`;
-
+  document.getElementById('chart-title').textContent = `${SENSOR_CONFIG[nodeId].icon} ${SENSOR_CONFIG[nodeId].name} · 歷史趨勢`;
   panel.classList.add('show');
-  fetchData(); // 立刻拉一次
+  fetchData();
 }
 
 function closeChart() {
@@ -629,65 +581,45 @@ function closeChart() {
 }
 
 // ────────────────────────────────────────────
-// 專題報告必備：匯出目前節點的 CSV 數據
+// CSV 匯出邏輯
 // ────────────────────────────────────────────
 function exportCSV() {
   if (!activeNode) return;
-  
-  // 取得目前正在看哪一個節點的資料
   fetch('/api/all_data')
     .then(res => res.json())
     .then(data => {
       const hist = data.history[activeNode];
-      if (!hist || !hist.labels) return alert('目前沒有足夠的歷史數據可匯出');
-
-      // 找出這個節點所有的數據標籤 (排除 labels 本身)
+      if (!hist || !hist.labels) return alert('數據不足');
       const keys = Object.keys(hist).filter(k => k !== 'labels');
-      
-      // 建立 CSV 標頭
       let csvContent = "Time," + keys.join(",") + "\n";
-      
-      // 依序填入每一筆數據
       for (let i = 0; i < hist.labels.length; i++) {
         let row = [hist.labels[i]];
-        keys.forEach(k => {
-          row.push(hist[k][i] !== undefined ? hist[k][i] : "");
-        });
+        keys.forEach(k => { row.push(hist[k][i] !== undefined ? hist[k][i] : ""); });
         csvContent += row.join(",") + "\n";
       }
-
-      // 觸發下載 (加入 BOM 解決 Excel 中文亂碼)
       const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.setAttribute("href", url);
-      link.setAttribute("download", `${activeNode}_data_export.csv`);
-      document.body.appendChild(link);
+      link.href = url;
+      link.download = `${activeNode}_export.csv`;
       link.click();
-      document.body.removeChild(link);
     });
 }
 
 // ────────────────────────────────────────────
-// 輪詢管理
+// 工具函式 (重要修復)
 // ────────────────────────────────────────────
-function startPolling() {
-  stopPolling();
-  fetchTimer = setInterval(fetchData, POLL_INTERVAL);
+function toNumbers(arr) {
+  return (arr ?? []).map(Number);
 }
-function stopPolling() {
-  if (fetchTimer) { clearInterval(fetchTimer); fetchTimer = null; }
-}
-
-// 頁面隱藏時暫停，回來時恢復（省資源）
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopPolling();
-  else { fetchData(); startPolling(); }
-});
 
 // ────────────────────────────────────────────
 // 啟動
 // ────────────────────────────────────────────
+function startPolling() { fetchTimer = setInterval(fetchData, POLL_INTERVAL); }
+function stopPolling() { clearInterval(fetchTimer); }
+document.addEventListener('visibilitychange', () => document.hidden ? stopPolling() : startPolling());
+
 initCards();
 fetchData();
 startPolling();

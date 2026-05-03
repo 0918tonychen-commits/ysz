@@ -6,7 +6,7 @@ import re
 # ==========================================
 # 1. 配置區域
 # ==========================================
-COM_PORT = 'COM4'           # 請根據實際情況修改 COM Port
+COM_PORT = 'COM6'           # 請根據實際情況修改 COM Port
 BAUD_RATE = 115200          # 必須與 Arduino 網關端一致
 RENDER_URL = "https://ysz.onrender.com/update"
 NODE_COOLDOWN = 1           # 節點上傳冷卻時間 (秒)
@@ -111,4 +111,3 @@ while True:
             print(f"⚠️ 系統異常: {e}")
             
     # 微小延遲避免 100% 佔用 CPU
-    time.sleep(0.01)
