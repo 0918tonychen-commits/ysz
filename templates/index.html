@@ -48,18 +48,22 @@
     .pulse { display: inline-block; width: 8px; height: 8px; background: currentColor; border-radius: 50%; margin-right: 8px; animation: blink 1.5s infinite; }
     @keyframes blink { 0%,100%{opacity:1; box-shadow:0 0 8px currentColor;} 50%{opacity:0.2; box-shadow:none;} }
 
-    /* 圖一：卡片換行佈局 */
+    /* ── 卡片格線與固定高度 ── */
     .scada-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; transition: 0.4s; }
     
     .card { 
       background: var(--surface); 
       border: 1px solid rgba(0, 240, 255, 0.2); 
       border-radius: 8px; 
-      padding: 20px; cursor: pointer; 
+      padding: 20px; 
+      cursor: pointer; 
       transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); 
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
+      height: 170px; /* 固定方塊高度 */
+      display: flex;
+      flex-direction: column;
     }
     .card::before { content: ''; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: var(--muted); transition: 0.3s; }
     .card:hover { transform: translateY(-5px); border-color: var(--cyan); box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(0, 240, 255, 0.1); }
@@ -68,17 +72,19 @@
     .card.active { border-color: var(--cyan); box-shadow: 0 0 25px rgba(0, 240, 255, 0.2); background: rgba(0, 240, 255, 0.05); }
     .card.active::before { background: var(--cyan); box-shadow: 0 0 15px var(--cyan); }
     
-    /* 隱形功能 (圖二) */
     .hidden { display: none !important; }
 
     .card-title { font-size: 0.8rem; color: var(--text); margin-bottom: 15px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px; }
     
-    .val-container { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+    .val-container { 
+      display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; 
+      flex: 1; align-content: flex-start; /* 讓數值靠上對齊 */
+    }
     .val-item { flex: 1 1 40%; }
     .val-label { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
     .val-num { font-size: 1.6rem; font-weight: bold; text-shadow: 0 0 10px currentColor; }
 
-    /* 圖二：圖表面板渲染 */
+    /* ── 圖表面板 ── */
     .chart-panel { 
       background: var(--surface); border-radius: 8px; border: 1px solid var(--cyan); 
       box-shadow: 0 0 30px rgba(0, 240, 255, 0.1); max-height: 0; opacity: 0; overflow: hidden; 
@@ -88,19 +94,22 @@
 
     .chart-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 15px; border-bottom: 1px dashed rgba(0, 240, 255, 0.3); margin-bottom: 15px; }
     
-    /* 橫向滾動外框 */
     .chart-scroll-box { width: 100%; overflow-x: auto; background: #02040a; border-radius: 4px; padding: 10px; border: 1px solid #111b27; }
     .chart-scroll-box::-webkit-scrollbar { height: 8px; }
     .chart-scroll-box::-webkit-scrollbar-thumb { background: var(--cyan); border-radius: 4px; }
     .chart-scroll-box::-webkit-scrollbar-track { background: #02040a; }
     .chart-content { min-width: 1200px; height: 350px; position: relative; } 
 
+    /* ── 按鈕樣式 ── */
     .btn { 
       background: transparent; border: 1px solid var(--cyan); color: var(--cyan); 
       padding: 6px 15px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; 
       text-transform: uppercase; transition: 0.3s; box-shadow: inset 0 0 5px rgba(0,240,255,0.2);
     }
     .btn:hover { background: var(--cyan); color: #000; box-shadow: 0 0 15px var(--cyan); }
+    
+    .btn-danger { border-color: var(--red); color: var(--red); box-shadow: inset 0 0 5px rgba(255, 0, 60, 0.2); }
+    .btn-danger:hover { background: var(--red); color: #fff; box-shadow: 0 0 15px var(--red); }
   </style>
 </head>
 <body>
@@ -121,7 +130,7 @@
       <div id="legend-container" style="display:flex; gap:20px; font-size:0.85rem; align-items:center;"></div>
       <div style="display:flex; gap:10px;">
         <button class="btn" onclick="exportCSV()">[ DOWNLOAD.CSV ]</button> 
-        <button class="btn" style="border-color:var(--red); color:var(--red);" onclick="closeChart()">[ CLOSE ]</button>
+        <button class="btn btn-danger" onclick="closeChart()">[ CLOSE ]</button>
       </div>
     </div>
     <div class="chart-scroll-box">
@@ -133,7 +142,7 @@
 </div>
 
 <script>
-// ── 1. 系統配置 ──
+// ── 配置區 ──
 const SENSOR_CONFIG = {
   s01: { name: 'NODE_01', icon: '📍', sensors: ['t', 'h'] },
   s02: { name: 'NODE_02', icon: '📍', sensors: ['c', 't', 'h'] },
@@ -145,7 +154,7 @@ const SENSOR_CONFIG = {
 let activeNode = null;
 let chart = null;
 
-// ── 2. 優先渲染介面 (防呆機制：確保不管圖表載入成功與否，卡片都會先出來) ──
+// 初始化卡片
 function initCards() {
   const grid = document.getElementById('scada-grid');
   Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
@@ -162,9 +171,9 @@ function initCards() {
     grid.appendChild(card);
   });
 }
-initCards(); // 立即執行
+initCards(); 
 
-// ── 3. 安全初始化圖表 ──
+// 初始化圖表
 try {
   const ctx = document.getElementById('myChart').getContext('2d');
   Chart.defaults.color = '#64748b';
@@ -182,11 +191,9 @@ try {
       }
     }
   });
-} catch (error) {
-  console.warn("圖表模組載入中或發生錯誤，但不影響數據監控。", error);
-}
+} catch (error) {}
 
-// ── 4. 聚焦模式邏輯 ──
+// 控制單點聚焦
 function toggleChart(id) {
   activeNode = id;
   document.querySelectorAll('.card').forEach(c => {
@@ -212,9 +219,9 @@ function closeChart() {
   }, 300); 
 }
 
-// ── 5. 圖表渲染 ──
+// 圖表繪製與雙 Y 軸
 function renderChart(id, h) {
-  if (!chart) return; // 防呆：圖表未載入完成時跳過畫圖，但不影響卡片
+  if (!chart) return; 
   chart.data.labels = h.labels;
   const datasets = [];
   const legendBox = document.getElementById('legend-container');
@@ -250,7 +257,7 @@ function renderChart(id, h) {
   if(scrollBox) scrollBox.scrollLeft = scrollBox.scrollWidth;
 }
 
-// ── 6. 數據通訊 ──
+// 數據通訊
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
@@ -258,7 +265,6 @@ async function fetchData() {
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
       conf.sensors.forEach(s => {
         const el = document.getElementById(`${id}-${s}`);
-        // 簡化邏輯，精準抓取 Python 丟來的 Key
         if(el) el.textContent = data[`${id}_${s}`]?.val || '--';
       });
     });
@@ -269,7 +275,6 @@ async function fetchData() {
   } catch(e){}
 }
 
-// ── 7. 補回 CSV 下載功能 ──
 function exportCSV() {
   if (!activeNode) return;
   fetch('/api/all_data').then(res => res.json()).then(data => {
