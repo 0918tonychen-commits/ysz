@@ -4,7 +4,7 @@ import time
 import re
 
 # --- 配置區 ---
-COM_PORT = 'COM4' 
+COM_PORT = 'COM6' 
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
 # 系統支持的所有感測器標籤
