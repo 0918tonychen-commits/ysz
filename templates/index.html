@@ -7,7 +7,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
- 
+
     :root {
       --bg:        #080c10;
       --surface:   #0f1720;
@@ -24,7 +24,7 @@
       --muted:     #64748b;
       --radius:    16px;
     }
- 
+
     body {
       font-family: 'Courier New', 'Consolas', monospace;
       background: var(--bg);
@@ -34,12 +34,12 @@
       justify-content: center;
       padding: 24px 16px;
     }
- 
+
     .container {
       width: 100%;
       max-width: 980px;
     }
- 
+
     /* ── Header ── */
     .header {
       display: flex;
@@ -84,7 +84,7 @@
     }
     .dot.pulse { animation: pulse 2s ease-in-out infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
- 
+
     /* ── Error toast ── */
     #error-toast {
       display: none;
@@ -111,7 +111,7 @@
       font-family: inherit;
     }
     .retry-btn:hover { background: rgba(255,71,87,0.1); }
- 
+
     /* ── Grid ── */
     .scada-grid {
       display: grid;
@@ -119,7 +119,7 @@
       gap: 16px;
       margin-bottom: 16px;
     }
- 
+
     /* ── Card ── */
     .card {
       background: var(--surface);
@@ -147,7 +147,7 @@
       box-shadow: 0 0 24px rgba(0,210,255,0.15);
     }
     .card.active::before { opacity: 1; }
- 
+
     .card-title {
       font-size: 0.78rem;
       color: var(--muted);
@@ -159,7 +159,7 @@
       gap: 8px;
     }
     .card-title .icon { font-size: 1rem; }
- 
+
     .val-row {
       display: flex;
       gap: 12px;
@@ -188,7 +188,7 @@
     .c-blue   { color: var(--blue); }
     .c-green  { color: var(--green); }
     .c-yellow { color: var(--yellow); }
- 
+
     /* CO2 large display */
     .co2-display {
       text-align: center;
@@ -197,7 +197,7 @@
       border-bottom: 0.5px solid var(--border);
     }
     .co2-display .val-num { font-size: 2.2rem; }
- 
+
     /* ── Chart Area ── */
     .chart-panel {
       background: var(--surface);
@@ -238,7 +238,7 @@
       font-family: inherit;
     }
     .close-btn:hover { color: var(--text); background: var(--surface2); }
- 
+
     .scroll-box {
       overflow-x: auto;
       scroll-behavior: smooth;
@@ -247,7 +247,7 @@
     .scroll-box::-webkit-scrollbar-thumb { background: rgba(0,210,255,0.25); border-radius: 4px; }
     .canvas-holder { height: 300px; }
     canvas { width: 100% !important; height: 100% !important; }
- 
+
     /* ── Footer ── */
     .footer {
       display: flex;
@@ -259,7 +259,7 @@
       letter-spacing: 0.08em;
     }
     #last-update { color: var(--muted); }
- 
+
     @media (max-width: 480px) {
       .header { flex-direction: column; }
       .val-num { font-size: 1.3rem; }
@@ -268,7 +268,7 @@
 </head>
 <body>
 <div class="container">
- 
+
   <!-- Header -->
   <div class="header">
     <div class="header-left">
@@ -280,21 +280,24 @@
       <span id="status-text">OFFLINE</span>
     </div>
   </div>
- 
+
   <!-- Error toast -->
   <div id="error-toast">
     <span>⚠ 無法連線至後端 API</span>
     <button class="retry-btn" onclick="manualRetry()">重試</button>
   </div>
- 
+
   <!-- Sensor cards -->
   <div id="scada-grid" class="scada-grid"></div>
- 
+
   <!-- Chart panel -->
   <div id="chart-panel" class="chart-panel">
     <div class="chart-header">
       <span class="chart-title" id="chart-title">歷史趨勢</span>
-      <button class="close-btn" onclick="closeChart()">✕</button>
+      <div>
+        <button class="close-btn" onclick="exportCSV()" style="margin-right: 8px; font-size: 0.8rem;">📥 匯出CSV</button>
+        <button class="close-btn" onclick="closeChart()">✕</button>
+      </div>
     </div>
     <div class="scroll-box" id="scroll-box">
       <div class="canvas-holder" id="canvas-holder">
@@ -302,15 +305,15 @@
       </div>
     </div>
   </div>
- 
+
   <!-- Footer -->
   <div class="footer">
     <span>⚡ LoRa SCADA · 自動輪詢 3s</span>
     <span id="last-update">—</span>
   </div>
- 
+
 </div>
- 
+
 <script>
 // ────────────────────────────────────────────
 // 設定
@@ -321,7 +324,7 @@ const SENSOR_CONFIG = {
   s03: { name: '懸浮微粒監測',  icon: '😷', type: 'pm_data' },
 };
 const POLL_INTERVAL = 3000;
- 
+
 // ────────────────────────────────────────────
 // 狀態
 // ────────────────────────────────────────────
@@ -330,7 +333,7 @@ let isFirstRender   = true;   // 該節點是否首次繪圖
 let fetchTimer      = null;   // setInterval handle
 let isFetching      = false;  // 防止 overlapping requests
 let retryCount      = 0;
- 
+
 // ────────────────────────────────────────────
 // Chart 初始化
 // ────────────────────────────────────────────
@@ -376,7 +379,7 @@ const chart = new Chart(ctx, {
     },
   },
 });
- 
+
 // ────────────────────────────────────────────
 // 建立感測器卡片
 // ────────────────────────────────────────────
@@ -396,7 +399,7 @@ function buildCard(id, conf) {
   `;
   return el;
 }
- 
+
 function cardBody(id, type) {
   if (type === 'env') {
     return `
@@ -441,14 +444,14 @@ function cardBody(id, type) {
       </div>
     </div>`;
 }
- 
+
 function initCards() {
   const grid = document.getElementById('scada-grid');
   Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
     grid.appendChild(buildCard(id, conf));
   });
 }
- 
+
 // ────────────────────────────────────────────
 // 更新卡片數值
 // ────────────────────────────────────────────
@@ -470,7 +473,7 @@ function updateCardValues(data) {
     });
   });
 }
- 
+
 // ────────────────────────────────────────────
 // 更新系統狀態
 // ────────────────────────────────────────────
@@ -482,7 +485,7 @@ function updateStatus(isOnline) {
   dot.className   = `dot ${isOnline ? 'pulse' : ''}`;
   txt.textContent = isOnline ? 'ONLINE' : 'OFFLINE';
 }
- 
+
 // ────────────────────────────────────────────
 // 更新圖表
 // ────────────────────────────────────────────
@@ -516,31 +519,31 @@ function buildDatasets(type, h) {
     { label: '濕度 (%)',  data: toNumbers(h.hum),  borderColor: '#36a2eb', yAxisID: 'y', tension: 0.4, pointRadius: 2 },
   ];
 }
- 
+
 function updateChart(nodeId, h) {
   const type      = SENSOR_CONFIG[nodeId].type;
   const firstLoad = isFirstRender;
   isFirstRender   = false;
- 
+
   // 計算 canvas 動態寬度
   const scrollBox      = document.getElementById('scroll-box');
   const minWidth       = Math.max(scrollBox.clientWidth, (h.labels?.length ?? 0) * 55);
   document.getElementById('canvas-holder').style.width = minWidth + 'px';
- 
+
   // 重建 datasets（避免殘留舊數據）
   chart.data.labels   = h.labels ?? [];
   chart.data.datasets = buildDatasets(type, h);
- 
+
   // 動畫：首次顯示才啟用
   chart.options.animation = firstLoad ? { duration: 800 } : false;
   chart.update(firstLoad ? 'default' : 'none');
- 
+
   // 自動捲到最右
   if (firstLoad || scrollBox.scrollLeft + scrollBox.clientWidth >= scrollBox.scrollWidth - 100) {
     setTimeout(() => { scrollBox.scrollLeft = scrollBox.scrollWidth; }, 60);
   }
 }
- 
+
 // ────────────────────────────────────────────
 // Fetch 資料
 // ────────────────────────────────────────────
@@ -551,21 +554,21 @@ async function fetchData() {
     const res  = await fetch('/api/all_data');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
- 
+
     hideError();
     retryCount = 0;
     updateStatus(data.status === 'online');
     updateCardValues(data);
- 
+
     if (activeNode && data.history?.[activeNode]) {
       updateChart(activeNode, data.history[activeNode]);
     }
- 
+
     // 更新時間戳
     const now = new Date();
     document.getElementById('last-update').textContent =
       `LAST UPDATE ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
- 
+
   } catch (err) {
     retryCount++;
     updateStatus(false);
@@ -575,7 +578,7 @@ async function fetchData() {
     isFetching = false;
   }
 }
- 
+
 // ────────────────────────────────────────────
 // 錯誤提示
 // ────────────────────────────────────────────
@@ -591,40 +594,80 @@ function manualRetry() {
   hideError();
   fetchData();
 }
- 
+
 // ────────────────────────────────────────────
 // 圖表開關
 // ────────────────────────────────────────────
 function toggleChart(nodeId) {
   const panel = document.getElementById('chart-panel');
- 
+
   if (activeNode === nodeId) {
     closeChart();
     return;
   }
- 
+
   // 切換節點
   activeNode    = nodeId;
   isFirstRender = true;
- 
+
   // 更新卡片樣式
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
   document.getElementById(`card-${nodeId}`).classList.add('active');
- 
+
   // 更新圖表標題
   document.getElementById('chart-title').textContent =
     `${SENSOR_CONFIG[nodeId].icon} ${SENSOR_CONFIG[nodeId].name} · 歷史趨勢`;
- 
+
   panel.classList.add('show');
   fetchData(); // 立刻拉一次
 }
- 
+
 function closeChart() {
   activeNode = null;
   document.getElementById('chart-panel').classList.remove('show');
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
 }
- 
+
+// ────────────────────────────────────────────
+// 專題報告必備：匯出目前節點的 CSV 數據
+// ────────────────────────────────────────────
+function exportCSV() {
+  if (!activeNode) return;
+  
+  // 取得目前正在看哪一個節點的資料
+  fetch('/api/all_data')
+    .then(res => res.json())
+    .then(data => {
+      const hist = data.history[activeNode];
+      if (!hist || !hist.labels) return alert('目前沒有足夠的歷史數據可匯出');
+
+      // 找出這個節點所有的數據標籤 (排除 labels 本身)
+      const keys = Object.keys(hist).filter(k => k !== 'labels');
+      
+      // 建立 CSV 標頭
+      let csvContent = "Time," + keys.join(",") + "\n";
+      
+      // 依序填入每一筆數據
+      for (let i = 0; i < hist.labels.length; i++) {
+        let row = [hist.labels[i]];
+        keys.forEach(k => {
+          row.push(hist[k][i] !== undefined ? hist[k][i] : "");
+        });
+        csvContent += row.join(",") + "\n";
+      }
+
+      // 觸發下載 (加入 BOM 解決 Excel 中文亂碼)
+      const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.setAttribute("href", url);
+      link.setAttribute("download", `${activeNode}_data_export.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    });
+}
+
 // ────────────────────────────────────────────
 // 輪詢管理
 // ────────────────────────────────────────────
@@ -635,20 +678,13 @@ function startPolling() {
 function stopPolling() {
   if (fetchTimer) { clearInterval(fetchTimer); fetchTimer = null; }
 }
- 
+
 // 頁面隱藏時暫停，回來時恢復（省資源）
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopPolling();
   else { fetchData(); startPolling(); }
 });
- 
-// ────────────────────────────────────────────
-// 工具函式
-// ────────────────────────────────────────────
-function toNumbers(arr) {
-  return (arr ?? []).map(Number);
-}
- 
+
 // ────────────────────────────────────────────
 // 啟動
 // ────────────────────────────────────────────
