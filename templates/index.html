@@ -9,18 +9,17 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     
     :root { 
-      --bg: #050914; /* 更深邃的背景 */
-      --surface: rgba(15, 23, 32, 0.85); /* 半透明毛玻璃 */
-      --cyan: #00f0ff; /* 賽博龐克藍 */
-      --green: #39ff14; /* 霓虹綠 */
-      --red: #ff003c; /* 警示紅 */
+      --bg: #050914; 
+      --surface: rgba(15, 23, 32, 0.85); 
+      --cyan: #00f0ff; 
+      --green: #39ff14; 
+      --red: #ff003c; 
       --blue: #0088ff; 
       --muted: #4b6584; 
       --text: #d1d8e0; 
       --grid-line: rgba(0, 240, 255, 0.05);
     }
 
-    /* 科技網格背景 */
     body { 
       font-family: 'Consolas', 'Courier New', monospace; 
       background-color: var(--bg);
@@ -37,7 +36,6 @@
     
     .container { width: 100%; max-width: 1100px; }
     
-    /* 頂部 HUD 資訊列 */
     .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; border-bottom: 1px solid var(--grid-line); padding-bottom: 15px; }
     .header h1 { font-size: 1.8rem; color: var(--cyan); letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 240, 255, 0.4); text-transform: uppercase; margin-bottom: 5px; }
     
@@ -50,11 +48,9 @@
     .pulse { display: inline-block; width: 8px; height: 8px; background: currentColor; border-radius: 50%; margin-right: 8px; animation: blink 1.5s infinite; }
     @keyframes blink { 0%,100%{opacity:1; box-shadow:0 0 8px currentColor;} 50%{opacity:0.2; box-shadow:none;} }
 
-    /* ── 圖一：卡片換行佈局 (Grid) ── */
-    /* 使用 auto-fill 讓卡片自動排版，每個最少 260px，畫面夠寬就會變成 3 排 */
+    /* 圖一：卡片換行佈局 */
     .scada-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; transition: 0.4s; }
     
-    /* 科技感卡片渲染 */
     .card { 
       background: var(--surface); 
       border: 1px solid rgba(0, 240, 255, 0.2); 
@@ -65,31 +61,24 @@
       position: relative;
       overflow: hidden;
     }
-    /* 卡片左側的發光裝飾線 */
     .card::before { content: ''; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: var(--muted); transition: 0.3s; }
     .card:hover { transform: translateY(-5px); border-color: var(--cyan); box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(0, 240, 255, 0.1); }
     .card:hover::before { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
     
-    /* 被選中的卡片狀態 */
-    .card.active { 
-      border-color: var(--cyan); 
-      box-shadow: 0 0 25px rgba(0, 240, 255, 0.2); 
-      background: rgba(0, 240, 255, 0.05);
-    }
+    .card.active { border-color: var(--cyan); box-shadow: 0 0 25px rgba(0, 240, 255, 0.2); background: rgba(0, 240, 255, 0.05); }
     .card.active::before { background: var(--cyan); box-shadow: 0 0 15px var(--cyan); }
     
-    /* 用來達成圖二「隱形」功能的 class */
+    /* 隱形功能 (圖二) */
     .hidden { display: none !important; }
 
     .card-title { font-size: 0.8rem; color: var(--text); margin-bottom: 15px; display: flex; align-items: center; gap: 8px; letter-spacing: 1px; }
     
-    /* 數值發光效果 */
     .val-container { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
     .val-item { flex: 1 1 40%; }
     .val-label { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
     .val-num { font-size: 1.6rem; font-weight: bold; text-shadow: 0 0 10px currentColor; }
 
-    /* ── 圖二：圖表面板渲染 ── */
+    /* 圖二：圖表面板渲染 */
     .chart-panel { 
       background: var(--surface); border-radius: 8px; border: 1px solid var(--cyan); 
       box-shadow: 0 0 30px rgba(0, 240, 255, 0.1); max-height: 0; opacity: 0; overflow: hidden; 
@@ -106,7 +95,6 @@
     .chart-scroll-box::-webkit-scrollbar-track { background: #02040a; }
     .chart-content { min-width: 1200px; height: 350px; position: relative; } 
 
-    /* 科技感按鈕 */
     .btn { 
       background: transparent; border: 1px solid var(--cyan); color: var(--cyan); 
       padding: 6px 15px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; 
@@ -126,21 +114,16 @@
     <div id="status-badge" class="status-badge"><span class="pulse" id="status-dot"></span><span id="status-text">OFFLINE</span></div>
   </div>
 
-  <!-- 網格區 (圖一設計) -->
   <div id="scada-grid" class="scada-grid"></div>
 
-  <!-- 圖表區 (圖二設計) -->
   <div id="chart-panel" class="chart-panel">
     <div class="chart-header">
-      <div id="legend-container" style="display:flex; gap:20px; font-size:0.85rem; align-items:center;">
-        <!-- 固定標籤 -->
-      </div>
+      <div id="legend-container" style="display:flex; gap:20px; font-size:0.85rem; align-items:center;"></div>
       <div style="display:flex; gap:10px;">
         <button class="btn" onclick="exportCSV()">[ DOWNLOAD.CSV ]</button> 
         <button class="btn" style="border-color:var(--red); color:var(--red);" onclick="closeChart()">[ CLOSE ]</button>
       </div>
     </div>
-    
     <div class="chart-scroll-box">
       <div class="chart-content">
         <canvas id="myChart"></canvas>
@@ -160,25 +143,9 @@ const SENSOR_CONFIG = {
 };
 
 let activeNode = null;
-const ctx = document.getElementById('myChart').getContext('2d');
-Chart.defaults.color = '#64748b';
-Chart.defaults.font.family = 'Consolas';
+let chart = null;
 
-const chart = new Chart(ctx, {
-  type: 'line',
-  data: { labels: [], datasets: [] },
-  options: {
-    responsive: true, maintainAspectRatio: false,
-    plugins: { legend: { display: false } }, 
-    scales: {
-      x: { grid: { color: 'rgba(0, 240, 255, 0.05)' } },
-      y: { grid: { color: 'rgba(0, 240, 255, 0.05)' } },
-      y1: { position: 'right', display: false, grid: { drawOnChartArea: false } }
-    }
-  }
-});
-
-// ── 2. 生成 HUD 介面 ──
+// ── 2. 優先渲染介面 (防呆機制：確保不管圖表載入成功與否，卡片都會先出來) ──
 function initCards() {
   const grid = document.getElementById('scada-grid');
   Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
@@ -195,21 +162,41 @@ function initCards() {
     grid.appendChild(card);
   });
 }
+initCards(); // 立即執行
 
-// ── 3. 核心功能：單點聚焦 (對應手繪圖二) ──
+// ── 3. 安全初始化圖表 ──
+try {
+  const ctx = document.getElementById('myChart').getContext('2d');
+  Chart.defaults.color = '#64748b';
+  Chart.defaults.font.family = 'Consolas';
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } }, 
+      scales: {
+        x: { grid: { color: 'rgba(0, 240, 255, 0.05)' } },
+        y: { grid: { color: 'rgba(0, 240, 255, 0.05)' } },
+        y1: { position: 'right', display: false, grid: { drawOnChartArea: false } }
+      }
+    }
+  });
+} catch (error) {
+  console.warn("圖表模組載入中或發生錯誤，但不影響數據監控。", error);
+}
+
+// ── 4. 聚焦模式邏輯 ──
 function toggleChart(id) {
   activeNode = id;
-  
-  // 將其他卡片「隱形」，只留下被點擊的卡片
   document.querySelectorAll('.card').forEach(c => {
     if (c.id === `card-${id}`) {
       c.classList.remove('hidden');
       c.classList.add('active');
     } else {
-      c.classList.add('hidden'); // 觸發隱身
+      c.classList.add('hidden'); 
     }
   });
-  
   document.getElementById('chart-panel').classList.add('show');
   fetchData();
 }
@@ -217,18 +204,17 @@ function toggleChart(id) {
 function closeChart() { 
   activeNode = null; 
   document.getElementById('chart-panel').classList.remove('show'); 
-  
-  // 恢復所有卡片顯示
   setTimeout(() => {
     document.querySelectorAll('.card').forEach(c => {
       c.classList.remove('hidden');
       c.classList.remove('active');
     });
-  }, 300); // 等圖表收合動畫跑完再顯示
+  }, 300); 
 }
 
-// ── 4. 數據渲染與圖表繪製 ──
+// ── 5. 圖表渲染 ──
 function renderChart(id, h) {
+  if (!chart) return; // 防呆：圖表未載入完成時跳過畫圖，但不影響卡片
   chart.data.labels = h.labels;
   const datasets = [];
   const legendBox = document.getElementById('legend-container');
@@ -252,7 +238,7 @@ function renderChart(id, h) {
       label: k.toUpperCase(), data: (h[k] ?? []).map(Number),
       borderColor: color, backgroundColor: color,
       yAxisID: isRight ? 'y1' : 'y',
-      borderWidth: 2, tension: 0.3, pointRadius: 2, pointBackgroundColor: var(--bg)
+      borderWidth: 2, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#050914' 
     });
     if(isRight) chart.options.scales.y1.display = true;
   });
@@ -261,10 +247,10 @@ function renderChart(id, h) {
   chart.update('none');
   
   const scrollBox = document.querySelector('.chart-scroll-box');
-  scrollBox.scrollLeft = scrollBox.scrollWidth;
+  if(scrollBox) scrollBox.scrollLeft = scrollBox.scrollWidth;
 }
 
-// ── 5. 通訊邏輯 ──
+// ── 6. 數據通訊 ──
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
@@ -272,7 +258,8 @@ async function fetchData() {
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
       conf.sensors.forEach(s => {
         const el = document.getElementById(`${id}-${s}`);
-        if(el) el.textContent = data[`${id}_${s}`]?.val || data[`${id}_c` && s==='c' ? `${id}_c` : s]?.val || '--';
+        // 簡化邏輯，精準抓取 Python 丟來的 Key
+        if(el) el.textContent = data[`${id}_${s}`]?.val || '--';
       });
     });
     const isOnline = data.status === 'online';
@@ -282,7 +269,22 @@ async function fetchData() {
   } catch(e){}
 }
 
-initCards();
+// ── 7. 補回 CSV 下載功能 ──
+function exportCSV() {
+  if (!activeNode) return;
+  fetch('/api/all_data').then(res => res.json()).then(data => {
+    const hist = data.history[activeNode];
+    const ks = Object.keys(hist).filter(k => k !== 'labels');
+    let csv = "\uFEFFTime," + ks.join(",") + "\n";
+    for(let i=0; i<hist.labels.length; i++) {
+      let r = [hist.labels[i]]; ks.forEach(k => r.push(hist[k][i])); csv += r.join(",") + "\n";
+    }
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `${activeNode}_DATA.csv`; a.click();
+  });
+}
+
 setInterval(fetchData, 3000);
 fetchData();
 </script>
