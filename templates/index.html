@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <title>LoRa SCADA 智能監控中心</title>
+  <title>LORA 環境監測系統</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     /* ── 🌌 終極 Cyberpunk 科技感渲染 ── */
@@ -36,6 +36,7 @@
     
     .container { width: 100%; max-width: 1100px; }
     
+    /* ── 標題區 (已還原你的名字) ── */
     .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; border-bottom: 1px solid var(--grid-line); padding-bottom: 15px; }
     .header h1 { font-size: 1.8rem; color: var(--cyan); letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 240, 255, 0.4); text-transform: uppercase; margin-bottom: 5px; }
     
@@ -138,8 +139,8 @@
 <div class="container">
   <div class="header">
     <div>
-      <h1>SYS.SCADA //</h1>
-      <p style="color:var(--muted); font-size:0.7rem; letter-spacing:1px;">NTNU VEHICLE ENERGY - MULTI NODE</p>
+      <h1>LORA 環境監測系統</h1>
+      <p style="color:var(--muted); font-size:0.7rem; letter-spacing:1px;">NTNU VEHICLE ENERGY Engineering - MULTI NODE</p>
     </div>
     <div id="status-badge" class="status-badge"><span class="pulse" id="status-dot"></span><span id="status-text">SYSTEM.INIT...</span></div>
   </div>
@@ -175,7 +176,7 @@ const SENSOR_CONFIG = {
 let activeNode = null;
 let chart = null;
 
-// 初始化卡片佈局與骨架屏
+// 初始化佈局與骨架屏
 function initCards() {
   const grid = document.getElementById('scada-grid');
   Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
@@ -223,23 +224,21 @@ try {
       responsive: true, maintainAspectRatio: false,
       plugins: { 
         legend: { display: false },
-        tooltip: { backgroundColor: 'rgba(5, 9, 20, 0.9)', titleColor: '#00f0ff', borderColor: '#00f0ff', borderWidth: 1 } // 深色提示框
+        tooltip: { backgroundColor: 'rgba(5, 9, 20, 0.9)', titleColor: '#00f0ff', borderColor: '#00f0ff', borderWidth: 1 }
       }, 
       scales: {
-        x: { grid: { color: 'rgba(0, 240, 255, 0.05)' } },
-        y: { grid: { color: 'rgba(0, 240, 255, 0.05)' } }
+        x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } }
       }
     }
   });
 } catch (error) {}
 
-// 單點聚焦與切換開關
+// 單點聚焦開關 (點擊打開，再點關閉)
 function toggleChart(id) {
   if (activeNode === id) {
     closeChart();
     return;
   }
-
   activeNode = id;
   document.querySelectorAll('.card').forEach(c => {
     if (c.id === `card-${id}`) {
@@ -250,7 +249,7 @@ function toggleChart(id) {
     }
   });
   document.getElementById('chart-panel').classList.add('show');
-  fetchData(); // 點擊時立刻抓取一次最新資料
+  fetchData();
 }
 
 function closeChart() { 
@@ -264,12 +263,12 @@ function closeChart() {
   }, 300); 
 }
 
-// 🛡️ 智慧圖表繪製：自適應獨立 Y 軸 + 前端防禦對齊機制
+// 🛡️ 智慧圖表繪製：獨立 Y 軸 + 展演彈性緩衝區 + 前端防禦對齊
 function renderChart(id, h) {
   if (!chart) return; 
   
   try {
-    const MAX_POINTS = 100; // 強制裁切：只保留最新 100 筆，避免舊資料堆積
+    const MAX_POINTS = 100; 
     let labels = h.labels || [];
     if (labels.length > MAX_POINTS) labels = labels.slice(-MAX_POINTS);
     chart.data.labels = labels;
@@ -281,7 +280,6 @@ function renderChart(id, h) {
     const colorMap = { temp: '#ff003c', hum: '#0088ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
     const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi');
     
-    // 重置所有座標軸，防止錯亂
     chart.options.scales = {
       x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } }
     };
@@ -292,21 +290,34 @@ function renderChart(id, h) {
       
       const axisId = index === 0 ? 'y' : `y${index}`; 
       
-      // 為每個指標建立專屬自適應放大鏡 Y 軸
       chart.options.scales[axisId] = {
         type: 'linear',
         position: index === 0 ? 'left' : 'right',
-        display: index < 2, // 保持版面乾淨，最多顯示左右各一組數字
-        beginAtZero: false, // 放大鏡模式啟動
+        display: index < 2,
+        beginAtZero: false,
         grid: { drawOnChartArea: index === 0 },
         ticks: { color: color }
       };
 
-      // 🛡️ 防禦資料長度不對等：自動對齊、裁切、補齊
+      // ✨ 設定展演最佳化 Y 軸緩衝
+      if (k === 'temp' || k === 't') {
+        chart.options.scales[axisId].suggestedMin = 20;
+        chart.options.scales[axisId].suggestedMax = 35;
+      } else if (k === 'hum' || k === 'h') {
+        chart.options.scales[axisId].suggestedMin = 40;
+        chart.options.scales[axisId].suggestedMax = 90;
+      } else if (k === 'co2' || k === 'c') {
+        chart.options.scales[axisId].suggestedMin = 400;
+        chart.options.scales[axisId].suggestedMax = 1000;
+      } else if (k.includes('pm')) {
+        chart.options.scales[axisId].suggestedMin = 0;
+        chart.options.scales[axisId].suggestedMax = 30;
+      }
+
       let dataArr = (h[k] ?? []).map(Number);
       if (dataArr.length > MAX_POINTS) dataArr = dataArr.slice(-MAX_POINTS);
-      while(dataArr.length < labels.length) dataArr.unshift(dataArr[0] || 0); // 補齊漏掉的數據
-      if(dataArr.length > labels.length) dataArr = dataArr.slice(-labels.length); // 切掉多餘的舊數據
+      while(dataArr.length < labels.length) dataArr.unshift(dataArr[0] || 0);
+      if(dataArr.length > labels.length) dataArr = dataArr.slice(-labels.length);
 
       datasets.push({
         label: k.toUpperCase(), 
@@ -316,23 +327,23 @@ function renderChart(id, h) {
         yAxisID: axisId,
         borderWidth: 2, 
         tension: 0.3, 
-        pointRadius: 3, // 調整為 3，兼顧單點顯示與線條美感
+        pointRadius: 3, 
         pointBackgroundColor: '#050914' 
       });
     });
 
     chart.data.datasets = datasets;
-    chart.update('none'); // 無動畫更新，避免效能卡頓
+    chart.update('none');
     
     const scrollBox = document.querySelector('.chart-scroll-box');
     if(scrollBox) scrollBox.scrollLeft = scrollBox.scrollWidth;
     
   } catch(err) {
-    console.error("圖表渲染防禦攔截:", err);
+    console.error("渲染攔截:", err);
   }
 }
 
-// 數據通訊與介面更新
+// 數據通訊
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
@@ -366,7 +377,6 @@ async function fetchData() {
         statusEl.textContent = 'ONLINE';
         statusEl.style.color = 'var(--green)';
 
-        // 讀取真實 RSSI
         const rssi = data[`${id}_rssi`]?.val ? parseFloat(data[`${id}_rssi`].val) : -100;
         let quality = 'poor';
         if (rssi > -70) quality = 'excellent';
@@ -386,11 +396,8 @@ async function fetchData() {
     const isOnline = data.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
-    
     if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
-  } catch(e) {
-    console.error("抓取數據異常:", e);
-  }
+  } catch(e) {}
 }
 
 function exportCSV() {
@@ -408,7 +415,6 @@ function exportCSV() {
   });
 }
 
-// 啟動排程
 setTimeout(fetchData, 1500); 
 setInterval(fetchData, 3000);
 </script>
