@@ -12,13 +12,13 @@ VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux']
 
 def extract_universal(raw_str):
     """
-    智慧解析：自動抓取節點 ID 並過濾中繼站資訊
+    智慧解析：自動抓取節點 ID、感測器數據與 RSSI 通訊品質
     """
     parts = raw_str.split(',')
     batch_data = {} 
     current_node = "unknown"
 
-    # 1. 識別真實數據源頭 (排除包含 via 的標籤)
+    # 1. 識別真實數據源頭 (排除包含 via 的中繼標籤)
     for item in parts:
         item_low = item.strip().lower()
         if "s0" in item_low and "via" not in item_low:
@@ -39,6 +39,20 @@ def extract_universal(raw_str):
                 if re.match(r'^-?\d+(\.\d+)?$', val):
                     batch_data[sensor] = val
                     break 
+
+    # 3. 獨立抓取 RSSI 通訊品質 (無敵正則表達式)
+    # 支援格式: "RSSI:-71", "rssi: -71", "rssi=-71"
+    rssi_match = re.search(r'rssi\s*[:=]?\s*(-?\d+)', raw_str, re.IGNORECASE)
+    if rssi_match:
+        batch_data['rssi'] = rssi_match.group(1)
+    # 如果是用逗號分隔的格式 (如 ..., rssi, -71, ...)
+    elif 'rssi' not in batch_data:
+        for i in range(len(parts)):
+            if parts[i].strip().lower() == 'rssi' and i + 1 < len(parts):
+                val = parts[i+1].strip()
+                if re.match(r'^-?\d+$', val):
+                    batch_data['rssi'] = val
+                    break
                     
     return current_node, batch_data
 
@@ -47,15 +61,21 @@ try:
     ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.1)
     print(f"✅ LoRa 網關已啟動: {COM_PORT}")
 except Exception as e:
-    print(f"❌ 無法開啟序列埠: {e}"); exit()
+    print(f"❌ 無法開啟序列埠: {e}")
+    exit()
 
 while True:
     if ser.in_waiting > 0:
         try:
             line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if "數據:" not in line: continue
+            if "數據:" not in line: 
+                continue
             
             payload_str = line.split("數據:")[1].strip()
+            
+            # ✨ 顯示原始數據功能，方便你監控與除錯硬體
+            print(f"📥 收到原始數據: {payload_str}") 
+            
             node_id, data_package = extract_universal(payload_str)
 
             if data_package and node_id != "unknown":
@@ -65,7 +85,7 @@ while True:
                     if res.status_code == 200:
                         print(f"🚀 [傳送成功] {node_id}: {data_package}")
                 except:
-                    print(f"📡 伺服器喚醒中...")
+                    print(f"📡 伺服器連線中...")
         except Exception as e:
             print(f"⚠️ 解析異常: {e}")
     time.sleep(0.01)

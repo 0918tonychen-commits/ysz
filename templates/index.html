@@ -336,7 +336,7 @@ async function fetchData() {
         statusEl.style.color = 'var(--green)';
 
         // ✨ 處理通訊品質 (模擬：實際應從數據中讀取 RSSI/SNR)
-        const rssi = data[`${id}_rssi`]?.val || (Math.random() * -50 - 50); // 若無數據，這行僅作展示用
+        const rssi = data[`${id}_rssi`]?.val ? parseFloat(data[`${id}_rssi`].val) : -100;// 讀取真實 RSSI。如果剛好沒收到，給個 -100 (無訊號) 兜底
         let quality = 'poor';
         if (rssi > -70) quality = 'excellent';
         else if (rssi > -85) quality = 'good';
