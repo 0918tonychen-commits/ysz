@@ -221,17 +221,19 @@ try {
     data: { labels: [], datasets: [] },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } }, 
+      plugins: { 
+        legend: { display: false },
+        tooltip: { backgroundColor: 'rgba(5, 9, 20, 0.9)', titleColor: '#00f0ff', borderColor: '#00f0ff', borderWidth: 1 } // 深色提示框
+      }, 
       scales: {
         x: { grid: { color: 'rgba(0, 240, 255, 0.05)' } },
-        y: { grid: { color: 'rgba(0, 240, 255, 0.05)' } },
-        y1: { position: 'right', display: false, grid: { drawOnChartArea: false } }
+        y: { grid: { color: 'rgba(0, 240, 255, 0.05)' } }
       }
     }
   });
 } catch (error) {}
 
-// 單點聚焦與切換開關 (點擊打開，再點關閉)
+// 單點聚焦與切換開關
 function toggleChart(id) {
   if (activeNode === id) {
     closeChart();
@@ -248,7 +250,7 @@ function toggleChart(id) {
     }
   });
   document.getElementById('chart-panel').classList.add('show');
-  fetchData();
+  fetchData(); // 點擊時立刻抓取一次最新資料
 }
 
 function closeChart() { 
@@ -262,44 +264,72 @@ function closeChart() {
   }, 300); 
 }
 
-// 智慧圖表繪製
+// 🛡️ 智慧圖表繪製：自適應獨立 Y 軸 + 前端防禦對齊機制
 function renderChart(id, h) {
   if (!chart) return; 
-  chart.data.labels = h.labels;
-  const datasets = [];
-  const legendBox = document.getElementById('legend-container');
-  legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
   
-  const colorMap = { temp: '#ff003c', hum: '#0088ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
-  
-  // ✨ 關鍵防護：過濾掉 labels 與 rssi，防止 rssi 的負數干擾圖表比例
-  const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi');
-  
-  const stats = keys.map(k => ({ key: k, max: Math.max(...(h[k]??[]).map(Number), 1) }));
-  const sorted = [...stats].sort((a,b) => a.max - b.max);
-  let splitIdx = -1;
-  for(let i=0; i<sorted.length-1; i++) if(sorted[i+1].max / sorted[i].max > 5) splitIdx = i;
+  try {
+    const MAX_POINTS = 100; // 強制裁切：只保留最新 100 筆，避免舊資料堆積
+    let labels = h.labels || [];
+    if (labels.length > MAX_POINTS) labels = labels.slice(-MAX_POINTS);
+    chart.data.labels = labels;
+    
+    const datasets = [];
+    const legendBox = document.getElementById('legend-container');
+    legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
+    
+    const colorMap = { temp: '#ff003c', hum: '#0088ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
+    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi');
+    
+    // 重置所有座標軸，防止錯亂
+    chart.options.scales = {
+      x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } }
+    };
 
-  keys.forEach(k => {
-    const isRight = splitIdx !== -1 && (sorted.findIndex(s => s.key === k) > splitIdx);
-    const color = colorMap[k] || '#00d2ff';
-    
-    legendBox.innerHTML += `<span style="color:${color}; text-shadow:0 0 5px ${color};">■ ${k.toUpperCase()}</span>`;
-    
-    datasets.push({
-      label: k.toUpperCase(), data: (h[k] ?? []).map(Number),
-      borderColor: color, backgroundColor: color,
-      yAxisID: isRight ? 'y1' : 'y',
-      borderWidth: 2, tension: 0.3, pointRadius: 2, pointBackgroundColor: '#050914' 
+    keys.forEach((k, index) => {
+      const color = colorMap[k] || '#00d2ff';
+      legendBox.innerHTML += `<span style="color:${color}; text-shadow:0 0 5px ${color};">■ ${k.toUpperCase()}</span>`;
+      
+      const axisId = index === 0 ? 'y' : `y${index}`; 
+      
+      // 為每個指標建立專屬自適應放大鏡 Y 軸
+      chart.options.scales[axisId] = {
+        type: 'linear',
+        position: index === 0 ? 'left' : 'right',
+        display: index < 2, // 保持版面乾淨，最多顯示左右各一組數字
+        beginAtZero: false, // 放大鏡模式啟動
+        grid: { drawOnChartArea: index === 0 },
+        ticks: { color: color }
+      };
+
+      // 🛡️ 防禦資料長度不對等：自動對齊、裁切、補齊
+      let dataArr = (h[k] ?? []).map(Number);
+      if (dataArr.length > MAX_POINTS) dataArr = dataArr.slice(-MAX_POINTS);
+      while(dataArr.length < labels.length) dataArr.unshift(dataArr[0] || 0); // 補齊漏掉的數據
+      if(dataArr.length > labels.length) dataArr = dataArr.slice(-labels.length); // 切掉多餘的舊數據
+
+      datasets.push({
+        label: k.toUpperCase(), 
+        data: dataArr,
+        borderColor: color, 
+        backgroundColor: color,
+        yAxisID: axisId,
+        borderWidth: 2, 
+        tension: 0.3, 
+        pointRadius: 3, // 調整為 3，兼顧單點顯示與線條美感
+        pointBackgroundColor: '#050914' 
+      });
     });
-    if(isRight) chart.options.scales.y1.display = true;
-  });
 
-  chart.data.datasets = datasets;
-  chart.update('none');
-  
-  const scrollBox = document.querySelector('.chart-scroll-box');
-  if(scrollBox) scrollBox.scrollLeft = scrollBox.scrollWidth;
+    chart.data.datasets = datasets;
+    chart.update('none'); // 無動畫更新，避免效能卡頓
+    
+    const scrollBox = document.querySelector('.chart-scroll-box');
+    if(scrollBox) scrollBox.scrollLeft = scrollBox.scrollWidth;
+    
+  } catch(err) {
+    console.error("圖表渲染防禦攔截:", err);
+  }
 }
 
 // 數據通訊與介面更新
@@ -310,7 +340,7 @@ async function fetchData() {
     const nowTime = new Date().toLocaleTimeString('zh-TW', { hour12: false });
 
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
-      let nodeActive = false; // JavaScript 的布林值使用小寫
+      let nodeActive = false; 
 
       conf.sensors.forEach(s => {
         const spanEl = document.getElementById(`${id}-${s}`);
@@ -319,7 +349,7 @@ async function fetchData() {
           if (valData) {
             spanEl.textContent = valData.val;
             nodeActive = true; 
-            spanEl.parentElement.classList.remove('skeleton'); // 移除數值骨架屏
+            spanEl.parentElement.classList.remove('skeleton'); 
             const color = s === 't' ? 'var(--red)' : s === 'h' ? 'var(--blue)' : 'var(--green)';
             spanEl.parentElement.style.color = color;
           }
@@ -350,12 +380,13 @@ async function fetchData() {
         statusEl.style.color = 'var(--muted)';
         signalEl.className = 'signal-bars'; 
       }
-      signalEl.classList.remove('skeleton'); // 移除訊號骨架屏
+      signalEl.classList.remove('skeleton'); 
     });
 
     const isOnline = data.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
+    
     if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
   } catch(e) {
     console.error("抓取數據異常:", e);
@@ -366,7 +397,7 @@ function exportCSV() {
   if (!activeNode) return;
   fetch('/api/all_data').then(res => res.json()).then(data => {
     const hist = data.history[activeNode];
-    const ks = Object.keys(hist).filter(k => k !== 'labels');
+    const ks = Object.keys(hist).filter(k => k !== 'labels' && k !== 'rssi');
     let csv = "\uFEFFTime," + ks.join(",") + "\n";
     for(let i=0; i<hist.labels.length; i++) {
       let r = [hist.labels[i]]; ks.forEach(k => r.push(hist[k][i])); csv += r.join(",") + "\n";
