@@ -40,7 +40,7 @@ def extract_universal(raw_str):
                     batch_data[sensor] = val
                     break 
 
-    # 3. 獨立抓取 RSSI 通訊品質 (無敵正則表達式)
+    # 3. 獨立抓取 RSSI 通訊品質 
     # 支援格式: "RSSI:-71", "rssi: -71", "rssi=-71"
     rssi_match = re.search(r'rssi\s*[:=]?\s*(-?\d+)', raw_str, re.IGNORECASE)
     if rssi_match:

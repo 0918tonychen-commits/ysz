@@ -234,8 +234,14 @@ try {
   });
 } catch (error) {}
 
-// 控制單點聚焦
+// 控制單點聚焦與開關切換
 function toggleChart(id) {
+  // ✨ 新增：如果點擊的卡片就是目前正在打開的卡片，則執行關閉動作
+  if (activeNode === id) {
+    closeChart();
+    return; // 結束執行，不再往下跑
+  }
+  // 以下為原本的開啟邏輯
   activeNode = id;
   document.querySelectorAll('.card').forEach(c => {
     if (c.id === `card-${id}`) {
