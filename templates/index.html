@@ -61,7 +61,7 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      height: 180px; /* ✨ 微調高度以容納新增資訊 */
+      height: 180px; 
       display: flex;
       flex-direction: column;
     }
@@ -77,11 +77,11 @@
     .card-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
     .card-title { font-size: 0.8rem; color: var(--text); display: flex; align-items: center; gap: 8px; letter-spacing: 1px; }
     
-    /* ✨ 新增：通訊品質指標樣式 */
+    /* ── 通訊品質指標 ── */
     .signal-bars { display: flex; gap: 2px; align-items: flex-end; width: 20px; height: 14px; }
     .bar { width: 3px; background: rgba(0,0,0,0.5); border: 0.5px solid var(--muted); transition: 0.3s; }
     .bar-1 { height: 25%; } .bar-2 { height: 50%; } .bar-3 { height: 75%; } .bar-4 { height: 100%; }
-    /* 不同品質的顏色 */
+    
     .signal-bars.excellent .bar { background: var(--green); border-color: transparent; box-shadow: 0 0 5px var(--green); }
     .signal-bars.good .bar { border-color: transparent; }
     .signal-bars.good .bar-1, .signal-bars.good .bar-2, .signal-bars.good .bar-3 { background: var(--cyan); box-shadow: 0 0 5px var(--cyan); }
@@ -98,10 +98,9 @@
     .val-label { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
     .val-num { font-size: 1.6rem; font-weight: bold; text-shadow: 0 0 10px currentColor; }
 
-    /* ✨ 新增：獨立時間戳記樣式 */
+    /* ── 獨立時間戳記與骨架屏 ── */
     .card-meta { font-size: 0.6rem; color: var(--muted); display: flex; justify-content: space-between; margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.03); }
 
-    /* ✨ 新增：首抽骨架屏樣式與動畫 */
     @keyframes skeleton-pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
     .skeleton { animation: skeleton-pulse 1.2s infinite; background-color: rgba(255,255,255,0.03); border-radius: 4px; color: transparent !important; text-shadow: none !important; }
     .skeleton::after { content: " "; display: block; height: 100%; }
@@ -139,8 +138,8 @@
 <div class="container">
   <div class="header">
     <div>
-      <h1>Lora 環境監測系統</h1>
-      <p style="color:var(--muted); font-size:0.7rem; letter-spacing:1px;">NTNU VEHICLE ENERGY Engineering - MULTI NODE</p>
+      <h1>SYS.SCADA //</h1>
+      <p style="color:var(--muted); font-size:0.7rem; letter-spacing:1px;">NTNU VEHICLE ENERGY - MULTI NODE</p>
     </div>
     <div id="status-badge" class="status-badge"><span class="pulse" id="status-dot"></span><span id="status-text">SYSTEM.INIT...</span></div>
   </div>
@@ -176,7 +175,7 @@ const SENSOR_CONFIG = {
 let activeNode = null;
 let chart = null;
 
-// ✨ 修改初始化卡片：加入骨架屏、訊號圖示、時間戳記佔位符
+// 初始化卡片佈局與骨架屏
 function initCards() {
   const grid = document.getElementById('scada-grid');
   Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
@@ -194,7 +193,6 @@ function initCards() {
       <div class="val-container">`;
       
     conf.sensors.forEach(s => {
-      // 初始加上 .skeleton class
       html += `
         <div class="val-item">
           <div class="val-label">${s.toUpperCase()}</div>
@@ -202,7 +200,6 @@ function initCards() {
         </div>`;
     });
     
-    // 獨立時間戳記佔位
     html += `</div>
       <div class="card-meta">
         <span>STATUS: <span id="${id}-status">CHECKING...</span></span>
@@ -234,14 +231,13 @@ try {
   });
 } catch (error) {}
 
-// 控制單點聚焦與開關切換
+// 單點聚焦與切換開關 (點擊打開，再點關閉)
 function toggleChart(id) {
-  // ✨ 新增：如果點擊的卡片就是目前正在打開的卡片，則執行關閉動作
   if (activeNode === id) {
     closeChart();
-    return; // 結束執行，不再往下跑
+    return;
   }
-  // 以下為原本的開啟邏輯
+
   activeNode = id;
   document.querySelectorAll('.card').forEach(c => {
     if (c.id === `card-${id}`) {
@@ -266,7 +262,7 @@ function closeChart() {
   }, 300); 
 }
 
-// 圖表繪製與雙 Y 軸
+// 智慧圖表繪製
 function renderChart(id, h) {
   if (!chart) return; 
   chart.data.labels = h.labels;
@@ -275,7 +271,9 @@ function renderChart(id, h) {
   legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
   
   const colorMap = { temp: '#ff003c', hum: '#0088ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
-  const keys = Object.keys(h).filter(k => k !== 'labels');
+  
+  // ✨ 關鍵防護：過濾掉 labels 與 rssi，防止 rssi 的負數干擾圖表比例
+  const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi');
   
   const stats = keys.map(k => ({ key: k, max: Math.max(...(h[k]??[]).map(Number), 1) }));
   const sorted = [...stats].sort((a,b) => a.max - b.max);
@@ -304,7 +302,7 @@ function renderChart(id, h) {
   if(scrollBox) scrollBox.scrollLeft = scrollBox.scrollWidth;
 }
 
-// ✨ 修改數據通訊：更新三大功能 (時間戳記、訊號、首抽骨架屏移除)
+// 數據通訊與介面更新
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
@@ -312,7 +310,7 @@ async function fetchData() {
     const nowTime = new Date().toLocaleTimeString('zh-TW', { hour12: false });
 
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
-      let nodeActive = False;
+      let nodeActive = false; // JavaScript 的布林值使用小寫
 
       conf.sensors.forEach(s => {
         const spanEl = document.getElementById(`${id}-${s}`);
@@ -320,29 +318,26 @@ async function fetchData() {
           const valData = data[`${id}_${s}`];
           if (valData) {
             spanEl.textContent = valData.val;
-            nodeActive = True;
-            // ✨ 移除數值的骨架屏 class
-            spanEl.parentElement.classList.remove('skeleton');
-            // 回復原本指定的霓虹顏色
+            nodeActive = true; 
+            spanEl.parentElement.classList.remove('skeleton'); // 移除數值骨架屏
             const color = s === 't' ? 'var(--red)' : s === 'h' ? 'var(--blue)' : 'var(--green)';
             spanEl.parentElement.style.color = color;
           }
         }
       });
 
-      // ✨ 更新獨立時間戳記與通訊品質
-      const timeEl = document.getElementById(`${id}-${time}`);
+      const timeEl = document.getElementById(`${id}-time`);
       const statusEl = document.getElementById(`${id}-status`);
       const signalEl = document.getElementById(`${id}-signal`);
 
       if (nodeActive) {
         timeEl.textContent = nowTime;
-        timeEl.classList.remove('skeleton'); // 移除時間骨架屏
+        timeEl.classList.remove('skeleton'); 
         statusEl.textContent = 'ONLINE';
         statusEl.style.color = 'var(--green)';
 
-        // ✨ 處理通訊品質 (模擬：實際應從數據中讀取 RSSI/SNR)
-        const rssi = data[`${id}_rssi`]?.val ? parseFloat(data[`${id}_rssi`].val) : -100;// 讀取真實 RSSI。如果剛好沒收到，給個 -100 (無訊號) 兜底
+        // 讀取真實 RSSI
+        const rssi = data[`${id}_rssi`]?.val ? parseFloat(data[`${id}_rssi`].val) : -100;
         let quality = 'poor';
         if (rssi > -70) quality = 'excellent';
         else if (rssi > -85) quality = 'good';
@@ -353,17 +348,18 @@ async function fetchData() {
       } else {
         statusEl.textContent = 'PENDING...';
         statusEl.style.color = 'var(--muted)';
-        signalEl.className = 'signal-bars'; // 無訊號
+        signalEl.className = 'signal-bars'; 
       }
-      // ✨ 移除訊號指示器的骨架屏 class
-      signalEl.classList.remove('skeleton');
+      signalEl.classList.remove('skeleton'); // 移除訊號骨架屏
     });
 
     const isOnline = data.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
     if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
-  } catch(e){}
+  } catch(e) {
+    console.error("抓取數據異常:", e);
+  }
 }
 
 function exportCSV() {
@@ -381,7 +377,7 @@ function exportCSV() {
   });
 }
 
-// 首次載入先呈現骨架屏畫面，3秒後進行第一次 fetchData
+// 啟動排程
 setTimeout(fetchData, 1500); 
 setInterval(fetchData, 3000);
 </script>
