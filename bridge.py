@@ -12,25 +12,43 @@ VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux']
 
 def extract_universal(raw_str):
     """
-    智慧解析：自動抓取節點 ID、感測器數據與 RSSI 通訊品質
+    升級版智慧解析：支援動態路由標頭 (Target, Level, Source_Mcount)
     """
     parts = raw_str.split(',')
     batch_data = {} 
     current_node = "unknown"
 
-    # 1. 識別真實數據源頭 (排除包含 via 的中繼標籤)
+    # 1. 識別真實數據源頭 (鎖定帶有 _m 特徵的發件人標籤)
     for item in parts:
         item_low = item.strip().lower()
-        if "s0" in item_low and "via" not in item_low:
+        # 新版路由特徵：真正的發件人會帶有 _m (例如 s03_m12)
+        if "s0" in item_low and "_m" in item_low:
             match = re.search(r'(s\d+)', item_low)
             if match:
                 current_node = match.group(1)
                 break
+                
+    # (向下相容機制：如果找不到 _m，用舊邏輯排除 via 找 s0x)
+    if current_node == "unknown":
+        for item in parts:
+            item_low = item.strip().lower()
+            if "s0" in item_low and "via" not in item_low and not item_low.startswith("l"):
+                match = re.search(r'(s\d+)', item_low)
+                if match:
+                    current_node = match.group(1)
+                    break
 
-    # 2. 抓取該節點的所有有效感測數據
+    # 2. 抓取該節點的所有有效感測數據 (排除動態路由特徵與收件人)
     for i in range(len(parts)):
         item = parts[i].strip().lower()
-        if "via" in item: continue
+        
+        # 跳過中繼標籤、發件人標籤與路由層級標籤 (例如 via, _m, L2, L3)
+        if "via" in item or "_m" in item or re.match(r'^l\d+$', item): 
+            continue
+        
+        # 避免把最前面的「收件人」(如 s01) 當作數據欄位解析
+        if re.match(r'^s\d+$', item):
+            continue
             
         for sensor in VALID_SENSORS:
             if item.endswith(sensor) and i + 1 < len(parts):
@@ -82,10 +100,14 @@ while True:
                 payload = {"node": node_id, "data": data_package}
                 try:
                     res = requests.post(RENDER_URL, json=payload, timeout=8)
-                    if res.status_code == 200:
+                    if res.status_code == 200 or res.status_code == 201:
                         print(f"🚀 [傳送成功] {node_id}: {data_package}")
+                    else:
+                        print(f"⚠️ [狀態異常] 代碼: {res.status_code}")
                 except:
                     print(f"📡 伺服器連線中...")
+            else:
+                print(f"⚠️ 忽略無效或不完整的封包")
         except Exception as e:
             print(f"⚠️ 解析異常: {e}")
     time.sleep(0.01)
