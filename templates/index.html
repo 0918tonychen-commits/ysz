@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <title>LORA 環境監測系統</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
   <style>
     /* ── 🌌 終極 Cyberpunk 科技感渲染 ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -36,7 +37,7 @@
     
     .container { width: 100%; max-width: 1100px; }
     
-    /* ── 標題區 (已還原你的名字) ── */
+    /* ── 標題區 ── */
     .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; border-bottom: 1px solid var(--grid-line); padding-bottom: 15px; }
     .header h1 { font-size: 1.8rem; color: var(--cyan); letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 240, 255, 0.4); text-transform: uppercase; margin-bottom: 5px; }
     
@@ -151,7 +152,7 @@
     <div class="chart-header">
       <div id="legend-container" style="display:flex; gap:20px; font-size:0.85rem; align-items:center;"></div>
       <div style="display:flex; gap:10px;">
-        <button class="btn" onclick="exportCSV()">[ DOWNLOAD.CSV ]</button> 
+        <button class="btn" onclick="exportExcel()">[ DOWNLOAD.XLSX ]</button> 
         <button class="btn btn-danger" onclick="closeChart()">[ CLOSE ]</button>
       </div>
     </div>
@@ -233,7 +234,7 @@ try {
   });
 } catch (error) {}
 
-// 單點聚焦開關 (點擊打開，再點關閉)
+// 單點聚焦開關
 function toggleChart(id) {
   if (activeNode === id) {
     closeChart();
@@ -263,7 +264,7 @@ function closeChart() {
   }, 300); 
 }
 
-// 🛡️ 智慧圖表繪製：獨立 Y 軸 + 展演彈性緩衝區 + 前端防禦對齊
+// 🛡️ 智慧圖表繪製
 function renderChart(id, h) {
   if (!chart) return; 
   
@@ -278,7 +279,9 @@ function renderChart(id, h) {
     legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
     const colorMap = { temp: '#ff003c', hum: '#0088ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
-    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi');
+    
+    // UI 折線圖忽略 rssi 和 r_in (因為數值範圍差太多會影響觀看)
+    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in');
     
     chart.options.scales = {
       x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } }
@@ -299,7 +302,6 @@ function renderChart(id, h) {
         ticks: { color: color }
       };
 
-      // ✨ 設定展演最佳化 Y 軸緩衝
       if (k === 'temp' || k === 't') {
         chart.options.scales[axisId].suggestedMin = 20;
         chart.options.scales[axisId].suggestedMax = 35;
@@ -400,18 +402,37 @@ async function fetchData() {
   } catch(e) {}
 }
 
-function exportCSV() {
+// 🌟 升級版：直接匯出真正的 Excel (.xlsx) 檔案
+function exportExcel() {
   if (!activeNode) return;
   fetch('/api/all_data').then(res => res.json()).then(data => {
     const hist = data.history[activeNode];
-    const ks = Object.keys(hist).filter(k => k !== 'labels' && k !== 'rssi');
-    let csv = "\uFEFFTime," + ks.join(",") + "\n";
-    for(let i=0; i<hist.labels.length; i++) {
-      let r = [hist.labels[i]]; ks.forEach(k => r.push(hist[k][i])); csv += r.join(",") + "\n";
+    
+    // 這裡我們故意「不排除」 rssi 和 r_in，把所有通訊品質數據一起匯出
+    // 這樣你才有數據畫論文 4.1 節的訊號折線圖！
+    const ks = Object.keys(hist).filter(k => k !== 'labels');
+    
+    // 1. 準備 Excel 陣列結構 (第一列是標題)
+    let sheetData = [ ["Time", ...ks.map(k => k.toUpperCase())] ];
+    
+    // 2. 填入歷史數據
+    for(let i = 0; i < hist.labels.length; i++) {
+      let row = [hist.labels[i]]; 
+      ks.forEach(k => {
+        let val = hist[k][i];
+        // 轉成純數字格式存入，這樣你在 Excel 才能直接畫圖
+        row.push(val !== undefined && val !== null ? Number(val) : "");
+      });
+      sheetData.push(row);
     }
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-    a.download = `${activeNode}_DATA.csv`; a.click();
+    
+    // 3. 建立虛擬 Excel 活頁簿與工作表
+    const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, `${activeNode}_Data`);
+    
+    // 4. 直接觸發下載真正的 .xlsx 檔案
+    XLSX.writeFile(workbook, `${activeNode}_DATA.xlsx`);
   });
 }
 
