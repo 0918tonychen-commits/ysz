@@ -165,25 +165,23 @@
 </div>
 
 <script>
-// ── 配置區 ──
-const SENSOR_CONFIG = {
-  s01: { name: 'NODE_01', icon: '📍', sensors: ['t', 'h'] },
-  s02: { name: 'NODE_02', icon: '📍', sensors: ['c', 't', 'h'] },
-  s03: { name: 'NODE_03', icon: '📍', sensors: ['pm25', 'pm10'] },
-  s04: { name: 'NODE_04', icon: '📍', sensors: ['pm25', 'pm10'] },
-  s05: { name: 'NODE_05', icon: '📍', sensors: ['c', 't', 'h'] },
-};
-
+// ── 動態配置區 ──
+// 🌟 初始狀態全空，等待邊緣閘道器推送數據自動生成
+let SENSOR_CONFIG = {}; 
 let activeNode = null;
 let chart = null;
 
-// 初始化佈局與骨架屏
+// ── 動態生成 UI 骨架 ──
 function initCards() {
   const grid = document.getElementById('scada-grid');
+  grid.innerHTML = ''; 
+  
   Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
     const card = document.createElement('div');
     card.className = 'card'; card.id = `card-${id}`;
     card.onclick = () => toggleChart(id);
+    
+    if (activeNode === id) card.classList.add('active');
     
     let html = `
       <div class="card-title-row">
@@ -211,9 +209,8 @@ function initCards() {
     card.innerHTML = html; grid.appendChild(card);
   });
 }
-initCards(); 
 
-// 初始化圖表
+// ── 初始化圖表 ──
 try {
   const ctx = document.getElementById('myChart').getContext('2d');
   Chart.defaults.color = '#64748b';
@@ -234,7 +231,7 @@ try {
   });
 } catch (error) {}
 
-// 單點聚焦開關
+// ── 面板開關邏輯 ──
 function toggleChart(id) {
   if (activeNode === id) {
     closeChart();
@@ -250,7 +247,7 @@ function toggleChart(id) {
     }
   });
   document.getElementById('chart-panel').classList.add('show');
-  fetchData();
+  fetchData(); 
 }
 
 function closeChart() { 
@@ -264,9 +261,10 @@ function closeChart() {
   }, 300); 
 }
 
-// 🛡️ 智慧圖表繪製
+// ── 🛡️ 智慧防禦型圖表繪製 ──
 function renderChart(id, h) {
-  if (!chart) return; 
+  // 🌟 防呆檢查：確保配置檔與圖表實體皆已存在
+  if (!chart || !SENSOR_CONFIG[id]) return; 
   
   try {
     const MAX_POINTS = 100; 
@@ -279,8 +277,6 @@ function renderChart(id, h) {
     legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
     const colorMap = { temp: '#ff003c', hum: '#0088ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
-    
-    // UI 折線圖忽略 rssi 和 r_in (因為數值範圍差太多會影響觀看)
     const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in');
     
     chart.options.scales = {
@@ -345,13 +341,40 @@ function renderChart(id, h) {
   }
 }
 
-// 數據通訊
+// ── 自動化數據獲取與動態解析 ──
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
     const data = await res.json();
     const nowTime = new Date().toLocaleTimeString('zh-TW', { hour12: false });
 
+    let configChanged = false;
+
+    // 自動偵測未知節點與感測器
+    Object.keys(data).forEach(key => {
+      if (key.match(/^s\d+_[a-z0-9]+$/i) && !key.includes('rssi') && !key.includes('r_in')) {
+        const parts = key.split('_');
+        const id = parts[0];     
+        const sensor = parts[1]; 
+        
+        if (!SENSOR_CONFIG[id]) {
+          SENSOR_CONFIG[id] = { name: `NODE_${id.toUpperCase().replace('S', '')}`, icon: '📍', sensors: [] };
+          configChanged = true;
+        }
+        
+        if (!SENSOR_CONFIG[id].sensors.includes(sensor)) {
+          SENSOR_CONFIG[id].sensors.push(sensor);
+          SENSOR_CONFIG[id].sensors.sort();
+          configChanged = true;
+        }
+      }
+    });
+
+    if (configChanged) {
+      initCards();
+    }
+
+    // 數據更新寫入 UI
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
       let nodeActive = false; 
 
@@ -392,51 +415,44 @@ async function fetchData() {
         statusEl.style.color = 'var(--muted)';
         signalEl.className = 'signal-bars'; 
       }
-      signalEl.classList.remove('skeleton'); 
+      if(signalEl) signalEl.classList.remove('skeleton'); 
     });
 
     const isOnline = data.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
+    
     if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
   } catch(e) {}
 }
 
-// 🌟 升級版：直接匯出真正的 Excel (.xlsx) 檔案
+// ── 🌟 Excel 完美匯出 (空值標準化) ──
 function exportExcel() {
   if (!activeNode) return;
   fetch('/api/all_data').then(res => res.json()).then(data => {
     const hist = data.history[activeNode];
-    
-    // 這裡我們故意「不排除」 rssi 和 r_in，把所有通訊品質數據一起匯出
-    // 這樣你才有數據畫論文 4.1 節的訊號折線圖！
     const ks = Object.keys(hist).filter(k => k !== 'labels');
     
-    // 1. 準備 Excel 陣列結構 (第一列是標題)
     let sheetData = [ ["Time", ...ks.map(k => k.toUpperCase())] ];
     
-    // 2. 填入歷史數據
     for(let i = 0; i < hist.labels.length; i++) {
       let row = [hist.labels[i]]; 
       ks.forEach(k => {
         let val = hist[k][i];
-        // 轉成純數字格式存入，這樣你在 Excel 才能直接畫圖
-        row.push(val !== undefined && val !== null ? Number(val) : "");
+        row.push(val !== undefined && val !== null && val !== "" ? Number(val) : null);
       });
       sheetData.push(row);
     }
     
-    // 3. 建立虛擬 Excel 活頁簿與工作表
     const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, `${activeNode}_Data`);
-    
-    // 4. 直接觸發下載真正的 .xlsx 檔案
     XLSX.writeFile(workbook, `${activeNode}_DATA.xlsx`);
   });
 }
 
-setTimeout(fetchData, 1500); 
+// 🌟 最終優化：網頁載入瞬間立刻觸發抓取，消滅 1.5 秒空窗期！
+fetchData(); 
 setInterval(fetchData, 3000);
 </script>
 </body>
