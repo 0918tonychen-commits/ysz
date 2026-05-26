@@ -14,8 +14,7 @@
       --surface: rgba(15, 23, 32, 0.85); 
       --cyan: #00f0ff; 
       --green: #39ff14; 
-      --red: #ff003c; 
-      --blue: #0088ff; 
+      --yellow: #f9ca24;
       --muted: #4b6584; 
       --text: #d1d8e0; 
       --grid-line: rgba(0, 240, 255, 0.05);
@@ -63,7 +62,7 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      height: 180px; 
+      height: 180px; /* 🌟 確保所有方塊大小絕對固定 */
       display: flex;
       flex-direction: column;
     }
@@ -88,9 +87,9 @@
     .signal-bars.good .bar { border-color: transparent; }
     .signal-bars.good .bar-1, .signal-bars.good .bar-2, .signal-bars.good .bar-3 { background: var(--cyan); box-shadow: 0 0 5px var(--cyan); }
     .signal-bars.fair .bar { border-color: transparent; }
-    .signal-bars.fair .bar-1, .signal-bars.fair .bar-2 { background: #f9ca24; box-shadow: 0 0 5px #f9ca24; }
+    .signal-bars.fair .bar-1, .signal-bars.fair .bar-2 { background: var(--yellow); box-shadow: 0 0 5px var(--yellow); }
     .signal-bars.poor .bar { border-color: transparent; }
-    .signal-bars.poor .bar-1 { background: var(--red); box-shadow: 0 0 5px var(--red); }
+    .signal-bars.poor .bar-1 { background: var(--muted); box-shadow: 0 0 5px var(--muted); }
     
     .val-container { 
       display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; 
@@ -131,8 +130,8 @@
     }
     .btn:hover { background: var(--cyan); color: #000; box-shadow: 0 0 15px var(--cyan); }
     
-    .btn-danger { border-color: var(--red); color: var(--red); box-shadow: inset 0 0 5px rgba(255, 0, 60, 0.2); }
-    .btn-danger:hover { background: var(--red); color: #fff; box-shadow: 0 0 15px var(--red); }
+    .btn-danger { border-color: var(--muted); color: var(--muted); box-shadow: inset 0 0 5px rgba(75, 101, 132, 0.2); }
+    .btn-danger:hover { background: var(--muted); color: #fff; box-shadow: 0 0 15px var(--muted); }
   </style>
 </head>
 <body>
@@ -166,17 +165,20 @@
 
 <script>
 // ── 動態配置區 ──
-// 🌟 初始狀態全空，等待邊緣閘道器推送數據自動生成
 let SENSOR_CONFIG = {}; 
 let activeNode = null;
 let chart = null;
 
-// ── 動態生成 UI 骨架 ──
+// ── 動態生成 UI 骨架 (強制排序版) ──
 function initCards() {
   const grid = document.getElementById('scada-grid');
   grid.innerHTML = ''; 
   
-  Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
+  // 🌟 強制依照 s01, s02, s03... 順序排隊
+  Object.entries(SENSOR_CONFIG)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .forEach(([id, conf]) => {
+      
     const card = document.createElement('div');
     card.className = 'card'; card.id = `card-${id}`;
     card.onclick = () => toggleChart(id);
@@ -263,7 +265,6 @@ function closeChart() {
 
 // ── 🛡️ 智慧防禦型圖表繪製 ──
 function renderChart(id, h) {
-  // 🌟 防呆檢查：確保配置檔與圖表實體皆已存在
   if (!chart || !SENSOR_CONFIG[id]) return; 
   
   try {
@@ -276,7 +277,7 @@ function renderChart(id, h) {
     const legendBox = document.getElementById('legend-container');
     legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
-    const colorMap = { temp: '#ff003c', hum: '#0088ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
+    const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
     const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in');
     
     chart.options.scales = {
@@ -386,7 +387,9 @@ async function fetchData() {
             spanEl.textContent = valData.val;
             nodeActive = true; 
             spanEl.parentElement.classList.remove('skeleton'); 
-            const color = s === 't' ? 'var(--red)' : s === 'h' ? 'var(--blue)' : 'var(--green)';
+            
+            // 🌟 統一看板文字顏色，避開紅藍配
+            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : 'var(--green)';
             spanEl.parentElement.style.color = color;
           }
         }
@@ -451,7 +454,7 @@ function exportExcel() {
   });
 }
 
-// 🌟 最終優化：網頁載入瞬間立刻觸發抓取，消滅 1.5 秒空窗期！
+// 網頁載入瞬間立刻觸發抓取
 fetchData(); 
 setInterval(fetchData, 3000);
 </script>
