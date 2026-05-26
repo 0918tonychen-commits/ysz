@@ -4,31 +4,31 @@ import time
 import re
 
 # --- 配置區 ---
-COM_PORT = 'COM6' 
+COM_PORT = 'COM6' # 請確認你的 COM Port 是否正確
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
-# 系統支持的所有感測器標籤
-VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux']
+# 🌟 已經將 'loss' 加入合法白名單
+VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'loss']
+
+# 🌟 全域變數：用來記錄每個節點的流水號與收發統計
+node_stats = {}
 
 def extract_universal(raw_str):
-    """
-    升級版智慧解析：支援動態路由標頭 (Target, Level, Source_Mcount)
-    """
     parts = raw_str.split(',')
     batch_data = {} 
     current_node = "unknown"
+    mcount = None
 
-    # 1. 識別真實數據源頭 (鎖定帶有 _m 特徵的發件人標籤)
+    # 1. 識別真實數據源頭與「流水號 (mcount)」
     for item in parts:
         item_low = item.strip().lower()
-        # 新版路由特徵：真正的發件人會帶有 _m (例如 s03_m12)
         if "s0" in item_low and "_m" in item_low:
-            match = re.search(r'(s\d+)', item_low)
+            match = re.search(r'(s\d+)_m(\d+)', item_low)
             if match:
                 current_node = match.group(1)
+                mcount = int(match.group(2))
                 break
                 
-    # (向下相容機制：如果找不到 _m，用舊邏輯排除 via 找 s0x)
     if current_node == "unknown":
         for item in parts:
             item_low = item.strip().lower()
@@ -38,32 +38,27 @@ def extract_universal(raw_str):
                     current_node = match.group(1)
                     break
 
-    # 2. 抓取該節點的所有有效感測數據 (排除動態路由特徵與收件人)
+    # 2. 抓取有效感測數據
     for i in range(len(parts)):
         item = parts[i].strip().lower()
         
-        # 跳過中繼標籤、發件人標籤與路由層級標籤 (例如 via, _m, L2, L3)
         if "via" in item or "_m" in item or re.match(r'^l\d+$', item): 
             continue
         
-        # 避免把最前面的「收件人」(如 s01) 當作數據欄位解析
         if re.match(r'^s\d+$', item):
             continue
             
         for sensor in VALID_SENSORS:
             if item.endswith(sensor) and i + 1 < len(parts):
                 val = parts[i+1].strip()
-                # 驗證是否為數字 (包含負數與小數)
                 if re.match(r'^-?\d+(\.\d+)?$', val):
                     batch_data[sensor] = val
                     break 
 
-    # 3. 獨立抓取 RSSI 通訊品質 
-    # 支援格式: "RSSI:-71", "rssi: -71", "rssi=-71"
+    # 3. 抓取最後一跳 RSSI
     rssi_match = re.search(r'rssi\s*[:=]?\s*(-?\d+)', raw_str, re.IGNORECASE)
     if rssi_match:
         batch_data['rssi'] = rssi_match.group(1)
-    # 如果是用逗號分隔的格式 (如 ..., rssi, -71, ...)
     elif 'rssi' not in batch_data:
         for i in range(len(parts)):
             if parts[i].strip().lower() == 'rssi' and i + 1 < len(parts):
@@ -71,7 +66,34 @@ def extract_universal(raw_str):
                 if re.match(r'^-?\d+$', val):
                     batch_data['rssi'] = val
                     break
-                    
+    
+    # ========================================================
+    # 🌟 4. 核心演算法：計算封包流失率 (Packet Loss Rate)
+    # ========================================================
+    if current_node != "unknown" and mcount is not None:
+        if current_node not in node_stats:
+            node_stats[current_node] = {'last_m': mcount, 'received': 1, 'expected': 1}
+            batch_data['loss'] = "0.0"
+        else:
+            stats = node_stats[current_node]
+            last_m = stats['last_m']
+            
+            if mcount > last_m:
+                stats['expected'] += (mcount - last_m)
+                stats['received'] += 1
+            elif mcount < last_m:
+                # 異常狀況：流水號變小了，代表 Arduino 被重新開機，統計歸零重算！
+                stats['expected'] = 1
+                stats['received'] = 1
+            else:
+                pass # 重複封包不列入計算
+                
+            stats['last_m'] = mcount
+            
+            if stats['expected'] > 0:
+                loss_rate = ((stats['expected'] - stats['received']) / stats['expected']) * 100
+                batch_data['loss'] = f"{loss_rate:.1f}"
+
     return current_node, batch_data
 
 # --- 主程序 ---
@@ -90,9 +112,7 @@ while True:
                 continue
             
             payload_str = line.split("數據:")[1].strip()
-            
-            # ✨ 顯示原始數據功能，方便你監控與除錯硬體
-            print(f"📥 收到原始數據: {payload_str}") 
+            print(f"📥 原始數據: {payload_str}") 
             
             node_id, data_package = extract_universal(payload_str)
 
@@ -106,8 +126,6 @@ while True:
                         print(f"⚠️ [狀態異常] 代碼: {res.status_code}")
                 except:
                     print(f"📡 伺服器連線中...")
-            else:
-                print(f"⚠️ 忽略無效或不完整的封包")
         except Exception as e:
             print(f"⚠️ 解析異常: {e}")
     time.sleep(0.01)

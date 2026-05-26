@@ -50,7 +50,6 @@
     .pulse { display: inline-block; width: 8px; height: 8px; background: currentColor; border-radius: 50%; margin-right: 8px; animation: blink 1.5s infinite; }
     @keyframes blink { 0%,100%{opacity:1; box-shadow:0 0 8px currentColor;} 50%{opacity:0.2; box-shadow:none;} }
 
-    /* ── 卡片格線與固定高度 ── */
     .scada-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; transition: 0.4s; }
     
     .card { 
@@ -79,7 +78,6 @@
     .card-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
     .card-title { font-size: 0.8rem; color: var(--text); display: flex; align-items: center; gap: 8px; letter-spacing: 1px; }
     
-    /* ── 通訊品質指標 ── */
     .signal-bars { display: flex; gap: 2px; align-items: flex-end; width: 20px; height: 14px; }
     .bar { width: 3px; background: rgba(0,0,0,0.5); border: 0.5px solid var(--muted); transition: 0.3s; }
     .bar-1 { height: 25%; } .bar-2 { height: 50%; } .bar-3 { height: 75%; } .bar-4 { height: 100%; }
@@ -100,14 +98,12 @@
     .val-label { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
     .val-num { font-size: 1.6rem; font-weight: bold; text-shadow: 0 0 10px currentColor; }
 
-    /* ── 獨立時間戳記與骨架屏 ── */
     .card-meta { font-size: 0.6rem; color: var(--muted); display: flex; justify-content: space-between; margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.03); }
 
     @keyframes skeleton-pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
     .skeleton { animation: skeleton-pulse 1.2s infinite; background-color: rgba(255,255,255,0.03); border-radius: 4px; color: transparent !important; text-shadow: none !important; }
     .skeleton::after { content: " "; display: block; height: 100%; }
 
-    /* ── 圖表面板 ── */
     .chart-panel { 
       background: var(--surface); border-radius: 8px; border: 1px solid var(--cyan); 
       box-shadow: 0 0 30px rgba(0, 240, 255, 0.1); max-height: 0; opacity: 0; overflow: hidden; 
@@ -123,7 +119,6 @@
     .chart-scroll-box::-webkit-scrollbar-track { background: #02040a; }
     .chart-content { min-width: 1200px; height: 350px; position: relative; } 
 
-    /* ── 按鈕樣式 ── */
     .btn { 
       background: transparent; border: 1px solid var(--cyan); color: var(--cyan); 
       padding: 6px 15px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; 
@@ -165,17 +160,14 @@
 </div>
 
 <script>
-// ── 動態配置區 ──
 let SENSOR_CONFIG = {}; 
 let activeNode = null;
 let chart = null;
 
-// ── 動態生成 UI 骨架 (優化排序版) ──
 function initCards() {
   const grid = document.getElementById('scada-grid');
   grid.innerHTML = ''; 
   
-  // 🌟 將物件轉為陣列並透過 localeCompare 進行自然數字母排序 (s01 -> s02 -> s03...)
   Object.entries(SENSOR_CONFIG)
     .sort((a, b) => a[0].localeCompare(b[0], undefined, {numeric: true, sensitivity: 'base'}))
     .forEach(([id, conf]) => {
@@ -213,7 +205,6 @@ function initCards() {
   });
 }
 
-// ── 初始化圖表 ──
 try {
   const ctx = document.getElementById('myChart').getContext('2d');
   Chart.defaults.color = '#64748b';
@@ -234,7 +225,6 @@ try {
   });
 } catch (error) {}
 
-// ── 面板開關邏輯 ──
 function toggleChart(id) {
   if (activeNode === id) {
     closeChart();
@@ -253,7 +243,6 @@ function toggleChart(id) {
   fetchData(); 
 }
 
-// 🌟 修復關閉按鈕語法錯誤
 function closeChart() { 
   activeNode = null; 
   document.getElementById('chart-panel').classList.remove('show'); 
@@ -265,7 +254,6 @@ function closeChart() {
   }, 300); 
 }
 
-// ── 🛡️ 智慧防禦型圖表繪製 (修復多軸錯覺版) ──
 function renderChart(id, h) {
   if (!chart || !SENSOR_CONFIG[id]) return; 
   
@@ -280,9 +268,10 @@ function renderChart(id, h) {
     legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
     const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24', t: '#f9ca24', h: '#00f0ff', c: '#39ff14' };
-    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in');
     
-    // 🌟 重置 Y 軸設定
+    // 🌟 關鍵修改：將 loss 加入過濾清單，不畫在折線圖上，避免干擾 Y 軸比例
+    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'loss');
+    
     chart.options.scales = {
       x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } },
       y: { display: false, position: 'left', grid: { drawOnChartArea: true }, ticks: {} },
@@ -293,18 +282,15 @@ function renderChart(id, h) {
       const color = colorMap[k] || '#00d2ff';
       legendBox.innerHTML += `<span style="color:${color}; text-shadow:0 0 5px ${color};">■ ${k.toUpperCase()}</span>`;
       
-      // 🌟 溫濕度強制共用右側(y1)，其餘氣體放左側(y)
       let axisId = (k === 't' || k === 'h' || k === 'temp' || k === 'hum') ? 'y1' : 'y';
       
       chart.options.scales[axisId].display = true;
       chart.options.scales[axisId].ticks.color = color; 
 
       if (axisId === 'y1') {
-        // 溫濕度共用 0~100 絕對刻度
         chart.options.scales[axisId].min = 0;
         chart.options.scales[axisId].max = 100;
       } else {
-        // 氣體微粒依數值自動彈性縮放
         if (k === 'c' || k === 'co2') {
           chart.options.scales[axisId].suggestedMin = 400;
           chart.options.scales[axisId].suggestedMax = 1500;
@@ -343,7 +329,6 @@ function renderChart(id, h) {
   }
 }
 
-// ── 自動化數據獲取與動態解析 ──
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
@@ -352,7 +337,6 @@ async function fetchData() {
 
     let configChanged = false;
 
-    // 自動偵測未知節點與感測器
     Object.keys(data).forEach(key => {
       if (key.match(/^s\d+_[a-z0-9]+$/i) && !key.includes('rssi') && !key.includes('r_in')) {
         const parts = key.split('_');
@@ -376,7 +360,6 @@ async function fetchData() {
       initCards();
     }
 
-    // 數據更新寫入 UI
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
       let nodeActive = false; 
 
@@ -389,8 +372,7 @@ async function fetchData() {
             nodeActive = true; 
             spanEl.parentElement.classList.remove('skeleton'); 
             
-            // 🌟 文字配色調校：全面抽離傳統紅藍配，採用柔和高質感的電子管黃與青藍色
-            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : 'var(--green)';
+            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : s === 'loss' ? 'var(--red)' : 'var(--green)';
             spanEl.parentElement.style.color = color;
           }
         }
@@ -429,7 +411,6 @@ async function fetchData() {
   } catch(e) {}
 }
 
-// ── 🌟 Excel 完美匯出 ──
 function exportExcel() {
   if (!activeNode) return;
   fetch('/api/all_data').then(res => res.json()).then(data => {
@@ -448,13 +429,12 @@ function exportExcel() {
     }
     
     const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
-    const workbook = XLSX.utils.book_new(); // 🌟 修復重複宣告
+    const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, `${activeNode}_Data`);
     XLSX.writeFile(workbook, `${activeNode}_DATA.xlsx`);
   });
 }
 
-// 🌟 網頁載入瞬間立刻觸發抓取
 fetchData(); 
 setInterval(fetchData, 3000);
 </script>
