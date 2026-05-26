@@ -15,6 +15,7 @@
       --cyan: #00f0ff; 
       --green: #39ff14; 
       --red: #ff003c; 
+      --blue: #0088ff; 
       --yellow: #f9ca24;
       --purple: #a29bfe;
       --muted: #4b6584; 
@@ -62,7 +63,7 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      height: 180px; /* 🌟 卡片高度絕對固定 */
+      height: 180px; 
       display: flex;
       flex-direction: column;
     }
@@ -243,6 +244,7 @@ function toggleChart(id) {
   fetchData(); 
 }
 
+// 🌟 【Bug 修正修復】拔除錯誤的 .remove('show')，捍衛網頁二次點擊時的 DOM 生命週期
 function closeChart() { 
   activeNode = null; 
   document.getElementById('chart-panel').classList.remove('show'); 
@@ -268,8 +270,6 @@ function renderChart(id, h) {
     legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
     const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24', t: '#f9ca24', h: '#00f0ff', c: '#39ff14' };
-    
-    // 🌟 將 snr 與 loss 從圖表中隱藏，確保 Y 軸比例不會被壓扁
     const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'loss' && k !== 'snr');
     
     chart.options.scales = {
@@ -372,7 +372,6 @@ async function fetchData() {
             nodeActive = true; 
             spanEl.parentElement.classList.remove('skeleton'); 
             
-            // 🌟 加入 SNR 的專屬科技紫色
             const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : s === 'loss' ? 'var(--red)' : s === 'snr' ? 'var(--purple)' : 'var(--green)';
             spanEl.parentElement.style.color = color;
           }
@@ -393,51 +392,4 @@ async function fetchData() {
         let quality = 'poor';
         if (rssi > -70) quality = 'excellent';
         else if (rssi > -85) quality = 'good';
-        else if (rssi > -100) quality = 'fair';
-        
-        signalEl.className = `signal-bars ${quality}`;
-        signalEl.title = `RSSI: ${Math.round(rssi)} dBm`;
-      } else {
-        statusEl.textContent = 'PENDING...';
-        statusEl.style.color = 'var(--muted)';
-        signalEl.className = 'signal-bars'; 
-      }
-      if(signalEl) signalEl.classList.remove('skeleton'); 
-    });
-
-    const isOnline = data.status === 'online';
-    document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
-    document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
-    if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
-  } catch(e) {}
-}
-
-function exportExcel() {
-  if (!activeNode) return;
-  fetch('/api/all_data').then(res => res.json()).then(data => {
-    const hist = data.history[activeNode];
-    const ks = Object.keys(hist).filter(k => k !== 'labels');
-    
-    let sheetData = [ ["Time", ...ks.map(k => k.toUpperCase())] ];
-    
-    for(let i = 0; i < hist.labels.length; i++) {
-      let row = [hist.labels[i]]; 
-      ks.forEach(k => {
-        let val = hist[k][i];
-        row.push(val !== undefined && val !== null && val !== "" ? Number(val) : null);
-      });
-      sheetData.push(row);
-    }
-    
-    const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, `${activeNode}_Data`);
-    XLSX.writeFile(workbook, `${activeNode}_DATA.xlsx`);
-  });
-}
-
-fetchData(); 
-setInterval(fetchData, 3000);
-</script>
-</body>
-</html>
+        else if (rssi > -1

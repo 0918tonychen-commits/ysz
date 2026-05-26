@@ -4,13 +4,14 @@ import time
 import re
 
 # --- 配置區 ---
-COM_PORT = 'COM6' # 請確認你的 COM Port 是否正確
+COM_PORT = 'COM6' # ⚠️ 請根據你電腦的裝置管理員確認你的 COM Port 號碼
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
-# 🌟 已將 'snr' 與 'loss' 加入合法白名單
+
+# 🌟 合法感測器白名單（包含中繼強度 r_in、流失率 loss、訊雜比 snr）
 VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'loss', 'snr']
 
-# 全域變數：用來記錄每個節點的流水號與收發統計
+# 🌟 全域變數：儲存修正後的動態統計追蹤器
 node_stats = {}
 
 def extract_universal(raw_str):
@@ -72,30 +73,42 @@ def extract_universal(raw_str):
     if snr_match:
         batch_data['snr'] = snr_match.group(1)
     
-    # 🌟 5. 核心演算法：計算封包流失率 (Packet Loss Rate)
+    # ========================================================
+    # 🌟 5. 核心演算法修復：完美動態區間封包流失率演算法
+    # ========================================================
     if current_node != "unknown" and mcount is not None:
         if current_node not in node_stats:
-            node_stats[current_node] = {'last_m': mcount, 'received': 1, 'expected': 1}
+            # 第一次成功接收該節點的封包：記錄起點流水號，實際收到數初始化為 1
+            node_stats[current_node] = {
+                'first_m': mcount, 
+                'last_m': mcount, 
+                'received_count': 1
+            }
             batch_data['loss'] = "0.0"
         else:
             stats = node_stats[current_node]
-            last_m = stats['last_m']
             
-            if mcount > last_m:
-                stats['expected'] += (mcount - last_m)
-                stats['received'] += 1
-            elif mcount < last_m:
-                # 異常狀況：流水號變小了，代表 Arduino 被重新開機，統計歸零重算！
-                stats['expected'] = 1
-                stats['received'] = 1
+            if mcount < stats['last_m']:
+                # 異常防禦機制：流水號變小，代表 Arduino 被重開機了，統計追蹤器直接歸零重新出發！
+                stats['first_m'] = mcount
+                stats['last_m'] = mcount
+                stats['received_count'] = 1
+                batch_data['loss'] = "0.0"
+            elif mcount == stats['last_m']:
+                # 重複封包，忽略不計
+                pass
             else:
-                pass # 重複封包不列入計算
+                # 正常遞增或跳號：更新最新流水號，實際收到總數 +1
+                stats['last_m'] = mcount
+                stats['received_count'] += 1
                 
-            stats['last_m'] = mcount
-            
-            if stats['expected'] > 0:
-                loss_rate = ((stats['expected'] - stats['received']) / stats['expected']) * 100
-                batch_data['loss'] = f"{loss_rate:.1f}"
+                # 計算這段期間「理論上應該收到」的總包數
+                expected_total = stats['last_m'] - stats['first_m'] + 1
+                
+                if expected_total > 0:
+                    loss_rate = ((expected_total - stats['received_count']) / expected_total) * 100
+                    if loss_rate < 0: loss_rate = 0.0 # 防呆機制
+                    batch_data['loss'] = f"{loss_rate:.1f}"
 
     return current_node, batch_data
 
