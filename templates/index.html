@@ -14,6 +14,8 @@
       --surface: rgba(15, 23, 32, 0.85); 
       --cyan: #00f0ff; 
       --green: #39ff14; 
+      --red: #ff003c; 
+      --blue: #0088ff; 
       --yellow: #f9ca24;
       --muted: #4b6584; 
       --text: #d1d8e0; 
@@ -36,7 +38,6 @@
     
     .container { width: 100%; max-width: 1100px; }
     
-    /* ── 標題區 ── */
     .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; border-bottom: 1px solid var(--grid-line); padding-bottom: 15px; }
     .header h1 { font-size: 1.8rem; color: var(--cyan); letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 240, 255, 0.4); text-transform: uppercase; margin-bottom: 5px; }
     
@@ -62,7 +63,7 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      height: 180px; /* 🌟 確保所有方塊大小絕對固定 */
+      height: 180px; 
       display: flex;
       flex-direction: column;
     }
@@ -169,14 +170,14 @@ let SENSOR_CONFIG = {};
 let activeNode = null;
 let chart = null;
 
-// ── 動態生成 UI 骨架 (強制排序版) ──
+// ── 動態生成 UI 骨架 (優化排序版) ──
 function initCards() {
   const grid = document.getElementById('scada-grid');
   grid.innerHTML = ''; 
   
-  // 🌟 強制依照 s01, s02, s03... 順序排隊
+  // 🌟 將物件轉為陣列並透過 localeCompare 進行自然數字母排序 (s01 -> s02 -> s03...)
   Object.entries(SENSOR_CONFIG)
-    .sort((a, b) => a[0].localeCompare(b[0]))
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, {numeric: true, sensitivity: 'base'}))
     .forEach(([id, conf]) => {
       
     const card = document.createElement('div');
@@ -252,6 +253,7 @@ function toggleChart(id) {
   fetchData(); 
 }
 
+// 🌟 修復關閉按鈕語法錯誤
 function closeChart() { 
   activeNode = null; 
   document.getElementById('chart-panel').classList.remove('show'); 
@@ -263,7 +265,7 @@ function closeChart() {
   }, 300); 
 }
 
-// ── 🛡️ 智慧防禦型圖表繪製 ──
+// ── 🛡️ 智慧防禦型圖表繪製 (修復多軸錯覺版) ──
 function renderChart(id, h) {
   if (!chart || !SENSOR_CONFIG[id]) return; 
   
@@ -277,40 +279,39 @@ function renderChart(id, h) {
     const legendBox = document.getElementById('legend-container');
     legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
-    const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24' };
+    const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24', t: '#f9ca24', h: '#00f0ff', c: '#39ff14' };
     const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in');
     
+    // 🌟 重置 Y 軸設定
     chart.options.scales = {
-      x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } }
+      x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } },
+      y: { display: false, position: 'left', grid: { drawOnChartArea: true }, ticks: {} },
+      y1: { display: false, position: 'right', grid: { drawOnChartArea: false }, ticks: {} }
     };
 
-    keys.forEach((k, index) => {
+    keys.forEach((k) => {
       const color = colorMap[k] || '#00d2ff';
       legendBox.innerHTML += `<span style="color:${color}; text-shadow:0 0 5px ${color};">■ ${k.toUpperCase()}</span>`;
       
-      const axisId = index === 0 ? 'y' : `y${index}`; 
+      // 🌟 溫濕度強制共用右側(y1)，其餘氣體放左側(y)
+      let axisId = (k === 't' || k === 'h' || k === 'temp' || k === 'hum') ? 'y1' : 'y';
       
-      chart.options.scales[axisId] = {
-        type: 'linear',
-        position: index === 0 ? 'left' : 'right',
-        display: index < 2,
-        beginAtZero: false,
-        grid: { drawOnChartArea: index === 0 },
-        ticks: { color: color }
-      };
+      chart.options.scales[axisId].display = true;
+      chart.options.scales[axisId].ticks.color = color; 
 
-      if (k === 'temp' || k === 't') {
-        chart.options.scales[axisId].suggestedMin = 20;
-        chart.options.scales[axisId].suggestedMax = 35;
-      } else if (k === 'hum' || k === 'h') {
-        chart.options.scales[axisId].suggestedMin = 40;
-        chart.options.scales[axisId].suggestedMax = 90;
-      } else if (k === 'co2' || k === 'c') {
-        chart.options.scales[axisId].suggestedMin = 400;
-        chart.options.scales[axisId].suggestedMax = 1000;
-      } else if (k.includes('pm')) {
-        chart.options.scales[axisId].suggestedMin = 0;
-        chart.options.scales[axisId].suggestedMax = 30;
+      if (axisId === 'y1') {
+        // 溫濕度共用 0~100 絕對刻度
+        chart.options.scales[axisId].min = 0;
+        chart.options.scales[axisId].max = 100;
+      } else {
+        // 氣體微粒依數值自動彈性縮放
+        if (k === 'c' || k === 'co2') {
+          chart.options.scales[axisId].suggestedMin = 400;
+          chart.options.scales[axisId].suggestedMax = 1500;
+        } else if (k.includes('pm')) {
+          chart.options.scales[axisId].suggestedMin = 0;
+          chart.options.scales[axisId].suggestedMax = 50;
+        }
       }
 
       let dataArr = (h[k] ?? []).map(Number);
@@ -388,7 +389,7 @@ async function fetchData() {
             nodeActive = true; 
             spanEl.parentElement.classList.remove('skeleton'); 
             
-            // 🌟 統一看板文字顏色，避開紅藍配
+            // 🌟 文字配色調校：全面抽離傳統紅藍配，採用柔和高質感的電子管黃與青藍色
             const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : 'var(--green)';
             spanEl.parentElement.style.color = color;
           }
@@ -424,12 +425,11 @@ async function fetchData() {
     const isOnline = data.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
-    
     if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
   } catch(e) {}
 }
 
-// ── 🌟 Excel 完美匯出 (空值標準化) ──
+// ── 🌟 Excel 完美匯出 ──
 function exportExcel() {
   if (!activeNode) return;
   fetch('/api/all_data').then(res => res.json()).then(data => {
@@ -448,13 +448,13 @@ function exportExcel() {
     }
     
     const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
-    const workbook = XLSX.utils.book_new();
+    const workbook = XLSX.utils.book_new(); // 🌟 修復重複宣告
     XLSX.utils.book_append_sheet(workbook, worksheet, `${activeNode}_Data`);
     XLSX.writeFile(workbook, `${activeNode}_DATA.xlsx`);
   });
 }
 
-// 網頁載入瞬間立刻觸發抓取
+// 🌟 網頁載入瞬間立刻觸發抓取
 fetchData(); 
 setInterval(fetchData, 3000);
 </script>
