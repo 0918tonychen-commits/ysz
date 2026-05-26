@@ -7,10 +7,10 @@ import re
 COM_PORT = 'COM6' # 請確認你的 COM Port 是否正確
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
-# 🌟 已經將 'loss' 加入合法白名單
-VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'loss']
+# 🌟 已將 'snr' 與 'loss' 加入合法白名單
+VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'loss', 'snr']
 
-# 🌟 全域變數：用來記錄每個節點的流水號與收發統計
+# 全域變數：用來記錄每個節點的流水號與收發統計
 node_stats = {}
 
 def extract_universal(raw_str):
@@ -66,10 +66,13 @@ def extract_universal(raw_str):
                 if re.match(r'^-?\d+$', val):
                     batch_data['rssi'] = val
                     break
+
+    # 🌟 4. 抓取 SNR (支援小數點與負數)
+    snr_match = re.search(r'snr\s*[:=]?\s*(-?\d+(\.\d+)?)', raw_str, re.IGNORECASE)
+    if snr_match:
+        batch_data['snr'] = snr_match.group(1)
     
-    # ========================================================
-    # 🌟 4. 核心演算法：計算封包流失率 (Packet Loss Rate)
-    # ========================================================
+    # 🌟 5. 核心演算法：計算封包流失率 (Packet Loss Rate)
     if current_node != "unknown" and mcount is not None:
         if current_node not in node_stats:
             node_stats[current_node] = {'last_m': mcount, 'received': 1, 'expected': 1}

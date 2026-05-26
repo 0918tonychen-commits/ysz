@@ -15,8 +15,8 @@
       --cyan: #00f0ff; 
       --green: #39ff14; 
       --red: #ff003c; 
-      --blue: #0088ff; 
       --yellow: #f9ca24;
+      --purple: #a29bfe;
       --muted: #4b6584; 
       --text: #d1d8e0; 
       --grid-line: rgba(0, 240, 255, 0.05);
@@ -62,7 +62,7 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      height: 180px; 
+      height: 180px; /* 🌟 卡片高度絕對固定 */
       display: flex;
       flex-direction: column;
     }
@@ -269,8 +269,8 @@ function renderChart(id, h) {
     
     const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24', t: '#f9ca24', h: '#00f0ff', c: '#39ff14' };
     
-    // 🌟 關鍵修改：將 loss 加入過濾清單，不畫在折線圖上，避免干擾 Y 軸比例
-    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'loss');
+    // 🌟 將 snr 與 loss 從圖表中隱藏，確保 Y 軸比例不會被壓扁
+    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'loss' && k !== 'snr');
     
     chart.options.scales = {
       x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } },
@@ -372,7 +372,8 @@ async function fetchData() {
             nodeActive = true; 
             spanEl.parentElement.classList.remove('skeleton'); 
             
-            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : s === 'loss' ? 'var(--red)' : 'var(--green)';
+            // 🌟 加入 SNR 的專屬科技紫色
+            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : s === 'loss' ? 'var(--red)' : s === 'snr' ? 'var(--purple)' : 'var(--green)';
             spanEl.parentElement.style.color = color;
           }
         }
