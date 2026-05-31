@@ -63,7 +63,8 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      height: 180px; 
+      min-height: 180px; /* 🌟 關鍵修正：改用 min-height */
+      height: auto;      /* 🌟 讓卡片可以自由往下長，絕對不遮擋 */
       display: flex;
       flex-direction: column;
     }
@@ -91,15 +92,15 @@
     .signal-bars.poor .bar { border-color: transparent; }
     .signal-bars.poor .bar-1 { background: var(--muted); box-shadow: 0 0 5px var(--muted); }
     
-    .val-container { 
-      display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; 
-      flex: 1; align-content: flex-start;
-    }
+    /* 🌟 UI 分層設計 */
+    .data-section { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; margin-bottom: 10px; }
+    .divider { width: 100%; height: 1px; background: rgba(0, 240, 255, 0.1); margin: 5px 0 10px 0; border-top: 1px dashed rgba(0, 240, 255, 0.2); }
+    
     .val-item { flex: 1 1 40%; }
     .val-label { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
     .val-num { font-size: 1.6rem; font-weight: bold; text-shadow: 0 0 10px currentColor; }
 
-    .card-meta { font-size: 0.6rem; color: var(--muted); display: flex; justify-content: space-between; margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.03); }
+    .card-meta { font-size: 0.6rem; color: var(--muted); display: flex; justify-content: space-between; margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.03); }
 
     @keyframes skeleton-pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
     .skeleton { animation: skeleton-pulse 1.2s infinite; background-color: rgba(255,255,255,0.03); border-radius: 4px; color: transparent !important; text-shadow: none !important; }
@@ -179,24 +180,45 @@ function initCards() {
     
     if (activeNode === id) card.classList.add('active');
     
+    // 🌟 邏輯分流：區分「環境感測」與「通訊指標」
+    const envSensors = conf.sensors.filter(s => s !== 'loss' && s !== 'snr');
+    const netSensors = conf.sensors.filter(s => s === 'loss' || s === 'snr');
+    
     let html = `
       <div class="card-title-row">
         <div class="card-title">${conf.icon} ${conf.name}</div>
         <div class="signal-bars skeleton" id="${id}-signal" title="通訊品質">
           <div class="bar bar-1"></div><div class="bar bar-2"></div><div class="bar bar-3"></div><div class="bar bar-4"></div>
         </div>
-      </div>
-      <div class="val-container">`;
+      </div>`;
       
-    conf.sensors.forEach(s => {
-      html += `
-        <div class="val-item">
-          <div class="val-label">${s.toUpperCase()}</div>
-          <div class="val-num skeleton" style="color:var(--text)"><span id="${id}-${s}">--</span></div>
-        </div>`;
-    });
+    // 渲染環境感測數據
+    if (envSensors.length > 0) {
+      html += `<div class="data-section">`;
+      envSensors.forEach(s => {
+        html += `
+          <div class="val-item">
+            <div class="val-label">${s.toUpperCase()}</div>
+            <div class="val-num skeleton" style="color:var(--text)"><span id="${id}-${s}">--</span></div>
+          </div>`;
+      });
+      html += `</div>`;
+    }
+
+    // 渲染通訊指標數據（加上分隔線）
+    if (netSensors.length > 0) {
+      html += `<div class="divider"></div><div class="data-section">`;
+      netSensors.forEach(s => {
+        html += `
+          <div class="val-item">
+            <div class="val-label">${s.toUpperCase()}</div>
+            <div class="val-num skeleton" style="color:var(--text)"><span id="${id}-${s}">--</span></div>
+          </div>`;
+      });
+      html += `</div>`;
+    }
     
-    html += `</div>
+    html += `
       <div class="card-meta">
         <span>STATUS: <span id="${id}-status">CHECKING...</span></span>
         <span>LAST: <span id="${id}-time" class="skeleton">00:00:00</span></span>
@@ -244,7 +266,6 @@ function toggleChart(id) {
   fetchData(); 
 }
 
-// 🌟 【Bug 修正修復】拔除錯誤的 .remove('show')，捍衛網頁二次點擊時的 DOM 生命週期
 function closeChart() { 
   activeNode = null; 
   document.getElementById('chart-panel').classList.remove('show'); 
@@ -270,6 +291,7 @@ function renderChart(id, h) {
     legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
     const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24', t: '#f9ca24', h: '#00f0ff', c: '#39ff14' };
+    
     const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'loss' && k !== 'snr');
     
     chart.options.scales = {
@@ -392,4 +414,51 @@ async function fetchData() {
         let quality = 'poor';
         if (rssi > -70) quality = 'excellent';
         else if (rssi > -85) quality = 'good';
-        else if (rssi > -1
+        else if (rssi > -100) quality = 'fair';
+        
+        signalEl.className = `signal-bars ${quality}`;
+        signalEl.title = `RSSI: ${Math.round(rssi)} dBm`;
+      } else {
+        statusEl.textContent = 'PENDING...';
+        statusEl.style.color = 'var(--muted)';
+        signalEl.className = 'signal-bars'; 
+      }
+      if(signalEl) signalEl.classList.remove('skeleton'); 
+    });
+
+    const isOnline = data.status === 'online';
+    document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
+    document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
+    if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
+  } catch(e) {}
+}
+
+function exportExcel() {
+  if (!activeNode) return;
+  fetch('/api/all_data').then(res => res.json()).then(data => {
+    const hist = data.history[activeNode];
+    const ks = Object.keys(hist).filter(k => k !== 'labels');
+    
+    let sheetData = [ ["Time", ...ks.map(k => k.toUpperCase())] ];
+    
+    for(let i = 0; i < hist.labels.length; i++) {
+      let row = [hist.labels[i]]; 
+      ks.forEach(k => {
+        let val = hist[k][i];
+        row.push(val !== undefined && val !== null && val !== "" ? Number(val) : null);
+      });
+      sheetData.push(row);
+    }
+    
+    const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, `${activeNode}_Data`);
+    XLSX.writeFile(workbook, `${activeNode}_DATA.xlsx`);
+  });
+}
+
+fetchData(); 
+setInterval(fetchData, 3000);
+</script>
+</body>
+</html>
