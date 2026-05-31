@@ -8,7 +8,7 @@ COM_PORT = 'COM6' # ⚠️ 請根據你電腦的裝置管理員確認你的 COM 
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
 
-# 🌟 合法感測器白名單（包含中繼強度 r_in、流失率 loss、訊雜比 snr）
+# 🌟 合法感測器白名單（確認補齊 'snr' 與 'loss'）
 VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'loss', 'snr']
 
 # 🌟 全域變數：儲存修正後的動態統計追蹤器
@@ -68,47 +68,52 @@ def extract_universal(raw_str):
                     batch_data['rssi'] = val
                     break
 
-    # 🌟 4. 抓取 SNR (支援小數點與負數)
+    # 4. 抓取 SNR (支援小數點與負數)
     snr_match = re.search(r'snr\s*[:=]?\s*(-?\d+(\.\d+)?)', raw_str, re.IGNORECASE)
     if snr_match:
         batch_data['snr'] = snr_match.group(1)
     
     # ========================================================
-    # 🌟 5. 核心演算法修復：完美動態區間封包流失率演算法
+    # 🌟 5. 核心演算法修正：防禦重複封包污染
     # ========================================================
-    if current_node != "unknown" and mcount is not None:
-        if current_node not in node_stats:
-            # 第一次成功接收該節點的封包：記錄起點流水號，實際收到數初始化為 1
-            node_stats[current_node] = {
-                'first_m': mcount, 
-                'last_m': mcount, 
-                'received_count': 1
-            }
-            batch_data['loss'] = "0.0"
-        else:
-            stats = node_stats[current_node]
-            
-            if mcount < stats['last_m']:
-                # 異常防禦機制：流水號變小，代表 Arduino 被重開機了，統計追蹤器直接歸零重新出發！
-                stats['first_m'] = mcount
-                stats['last_m'] = mcount
-                stats['received_count'] = 1
+    if current_node != "unknown":
+        if mcount is not None:
+            if current_node not in node_stats:
+                # 第一次成功接收該節點的封包：記錄起點流水號
+                node_stats[current_node] = {
+                    'first_m': mcount, 
+                    'last_m': mcount, 
+                    'received_count': 1,
+                    'last_loss': "0.0"
+                }
                 batch_data['loss'] = "0.0"
-            elif mcount == stats['last_m']:
-                # 重複封包，忽略不計
-                pass
             else:
-                # 正常遞增或跳號：更新最新流水號，實際收到總數 +1
-                stats['last_m'] = mcount
-                stats['received_count'] += 1
+                stats = node_stats[current_node]
                 
-                # 計算這段期間「理論上應該收到」的總包數
-                expected_total = stats['last_m'] - stats['first_m'] + 1
-                
-                if expected_total > 0:
-                    loss_rate = ((expected_total - stats['received_count']) / expected_total) * 100
-                    if loss_rate < 0: loss_rate = 0.0 # 防呆機制
-                    batch_data['loss'] = f"{loss_rate:.1f}"
+                if mcount < stats['last_m']:
+                    # 異常防禦：流水號變小，代表 Arduino 被重開機了，統計器歸零重新出發
+                    stats['first_m'] = mcount
+                    stats['last_m'] = mcount
+                    stats['received_count'] = 1
+                    stats['last_loss'] = "0.0"
+                    batch_data['loss'] = "0.0"
+                elif mcount == stats['last_m']:
+                    # 🛡️ 關鍵修正：重複封包，直接繼承上一次計算出來的有效流失率，不重複累加
+                    batch_data['loss'] = stats['last_loss']
+                else:
+                    # 正常遞增：更新最新流水號，實際收到總數 +1
+                    stats['last_m'] = mcount
+                    stats['received_count'] += 1
+                    
+                    expected_total = stats['last_m'] - stats['first_m'] + 1
+                    if expected_total > 0:
+                        loss_rate = ((expected_total - stats['received_count']) / expected_total) * 100
+                        if loss_rate < 0: loss_rate = 0.0
+                        stats['last_loss'] = f"{loss_rate:.1f}"
+                        batch_data['loss'] = stats['last_loss']
+        else:
+            # 🛡️ 關鍵修正：如果該封包沒帶 _m 流水號（舊節點），防呆給予 0.0 避免前端顯示空值
+            batch_data['loss'] = "0.0"
 
     return current_node, batch_data
 
