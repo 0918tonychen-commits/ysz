@@ -63,7 +63,7 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      height: 270px; /* 🌟 絕對固定高度，排版絕不混亂 */
+      height: 270px; /* 絕對固定高度 */
       display: flex;
       flex-direction: column;
     }
@@ -165,7 +165,9 @@ let SENSOR_CONFIG = {};
 let activeNode = null;
 let chart = null;
 
-// ── 動態生成 UI 骨架 (優化自然排序版) ──
+// 新增記憶體：用來攔截最新收到的歷史編號
+let lastReceivedMcount = {};
+
 function initCards() {
   const grid = document.getElementById('scada-grid');
   grid.innerHTML = ''; 
@@ -207,7 +209,6 @@ function initCards() {
     if (netSensors.length > 0) {
       html += `<div class="divider"></div><div class="data-section">`;
       netSensors.forEach(s => {
-        // 如果是 mcount 標籤，畫面上顯示為 M_NO (流水號縮寫)
         const displayLabel = s === 'mcount' ? 'M_NO' : s.toUpperCase();
         html += `
           <div class="val-item">
@@ -228,7 +229,6 @@ function initCards() {
   });
 }
 
-// ── 初始化圖表 ──
 try {
   const ctx = document.getElementById('myChart').getContext('2d');
   Chart.defaults.color = '#64748b';
@@ -267,7 +267,6 @@ function toggleChart(id) {
   fetchData(); 
 }
 
-// 🌟 【Bug 修正】拔除錯誤的 .remove('show')，捍衛網頁二次點擊時的 DOM 生命週期
 function closeChart() { 
   activeNode = null; 
   document.getElementById('chart-panel').classList.remove('show'); 
@@ -293,10 +292,9 @@ function renderChart(id, h) {
     const legendBox = document.getElementById('legend-container');
     legendBox.innerHTML = `<span style="color:var(--main-accent); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
-    // 🌟 修正：對齊環境縮寫與標準全名，補齊極簡白的主視覺色系映射
     const colorMap = { temp: '#f9ca24', hum: '#39ff14', co2: '#ffffff', pm25: '#ffffff', pm10: '#f9ca24', t: '#f9ca24', h: '#39ff14', c: '#ffffff' };
     
-    // 固定排除圖表上的通訊與流水號欄位，保持環境數據 Y 軸刻度精準不被拉扁
+    // 🌟 【正確對齊修正】：同步過濾清單，納入新指標 'loss'，阻止其破壞環境資料 Y 軸
     const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'mcount' && k !== 'snr' && k !== 'loss');
     
     chart.options.scales = {
@@ -393,6 +391,16 @@ async function fetchData() {
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
       let nodeActive = false; 
 
+      // 攔截控制
+      const currentMcountVal = data[`${id}_mcount`]?.val;
+      if (currentMcountVal !== undefined && currentMcountVal !== null) {
+        if (lastReceivedMcount[id] === currentMcountVal) {
+          nodeActive = true; 
+        } else {
+          lastReceivedMcount[id] = currentMcountVal;
+        }
+      }
+
       conf.sensors.forEach(s => {
         const spanEl = document.getElementById(`${id}-${s}`);
         if(spanEl) {
@@ -402,7 +410,6 @@ async function fetchData() {
             nodeActive = true; 
             spanEl.parentElement.classList.remove('skeleton'); 
             
-            // 🌟 欄位警示色分流：MCOUNT 與 LOSS、SNR 設為紅色警示，其餘回歸高質感主題色
             const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--green)' : (s === 'mcount' || s === 'snr' || s === 'loss') ? 'var(--red)' : 'var(--main-accent)';
             spanEl.parentElement.style.color = color;
           }
@@ -438,7 +445,11 @@ async function fetchData() {
     const isOnline = data.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
-    if(activeNode && data.history[activeNode]) renderChart(activeNode, data.history[activeNode]);
+    
+    // 🌟 【核心修復】：免除前端重複遍歷去重負擔，直接交由後台強健資料庫驅動，大幅釋放 CPU 壓力
+    if(activeNode && data.history[activeNode]) {
+      renderChart(activeNode, data.history[activeNode]);
+    }
   } catch(e) {}
 }
 

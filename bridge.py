@@ -8,8 +8,11 @@ COM_PORT = 'COM6' # ⚠️ 請根據你電腦的裝置管理員確認你的 COM 
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
 
-# 🌟 將 loss 改為 mcount，作為合法感測器白名單
+# 🌟 合法感測器白名單（維持與前端完全對齊）
 VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'mcount', 'snr']
+
+# 🌟 全域變數：儲存每個節點上一次成功收到的 MCOUNT 編號
+last_mcount_tracker = {}
 
 def extract_universal(raw_str):
     parts = raw_str.split(',')
@@ -36,19 +39,27 @@ def extract_universal(raw_str):
                     current_node = match.group(1)
                     break
 
-    # 2. 抓取有效感測數據 (優化過濾條件，防範欄位遺漏)
+    # 🌟 核心過濾機制：如果在最源頭就發現編號重複，直接拒絕解析！
+    if current_node != "unknown" and mcount is not None:
+        if current_node in last_mcount_tracker and last_mcount_tracker[current_node] == mcount:
+            print(f"🛡️ [閘道器防禦] 攔截 {current_node} 重複編號 M{mcount}，丟棄該重複封包。")
+            return current_node, {} # 回傳空字典，阻斷後續發送
+        else:
+            last_mcount_tracker[current_node] = mcount
+
+    # 2. 抓取有效感測數據 (🛡️ 精確化防禦修復：防範 _m 特徵誤殺數據)
     for i in range(len(parts)):
         item = parts[i].strip().lower()
         
-        # 僅排除純路徑標籤與節點定義字串，避免誤殺內含的感測數據項目
+        # 只過濾純路徑與純節點前綴，放行包含感測數據的鍵值對
         if "via" in item or re.match(r'^l\d+$', item): 
             continue
-            
         if re.match(r'^s\d+$', item):
             continue
             
         for sensor in VALID_SENSORS:
-            if item == sensor and i + 1 < len(parts):  # 使用精確精準匹配
+            # ✨ 精確對齊：直接匹配感測器 Key
+            if item == sensor and i + 1 < len(parts):
                 val = parts[i+1].strip()
                 if re.match(r'^-?\d+(\.\d+)?$', val):
                     batch_data[sensor] = val
@@ -71,20 +82,18 @@ def extract_universal(raw_str):
     if snr_match:
         batch_data['snr'] = snr_match.group(1)
     
-    # ========================================================
-    # 🌟 直接裝編號：流水號直傳雲端，降低網關運算開銷
-    # ========================================================
+    # 裝填編號直傳
     if mcount is not None:
         batch_data['mcount'] = str(mcount)
     elif 'mcount' not in batch_data:
-        batch_data['mcount'] = "0" # 防呆
+        batch_data['mcount'] = "0"
 
     return current_node, batch_data
 
 # --- 主程序 ---
 try:
     ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.1)
-    print(f"✅ LoRa 網關已啟動: {COM_PORT}")
+    print(f"✅ LoRa 閘道器已啟動: {COM_PORT}")
 except Exception as e:
     print(f"❌ 無法開啟序列埠: {e}")
     exit()
@@ -102,23 +111,24 @@ try:
                 
                 node_id, data_package = extract_universal(payload_str)
 
+                # 🌟 只有在 data_package 內部有感測數據時（未被攔截），才觸發雲端 POST
                 if data_package and node_id != "unknown":
                     payload = {"node": node_id, "data": data_package}
                     try:
-                        # ⚠️ Render 免費版有休眠機制，初次連線可能需較長回應時間，此處超時設為 8 秒
                         res = requests.post(RENDER_URL, json=payload, timeout=8)
                         if res.status_code in [200, 201]:
                             print(f"🚀 [傳送成功] {node_id}: {data_package}")
                         else:
                             print(f"⚠️ [伺服器異常] 狀態碼: {res.status_code}")
                     except requests.RequestException as req_err:
-                        print(f"🌐 [網路傳輸失敗] 無法連線至 Render: {req_err}")
+                        # 顯性錯誤輸出，極大地方便場域實測時的網路狀況除錯
+                        print(f"🌐 [傳輸超時/失敗] 正在等待雲端伺服器響應或喚醒: {req_err}")
             except Exception as e:
                 print(f"⚠️ 解析異常: {e}")
         time.sleep(0.01)
 except KeyboardInterrupt:
-    print("\n🛑 收到終止訊號，正在安全關閉 LoRa 網關...")
+    print("\n🛑 接收到手動終止指令，正在關閉系統...")
 finally:
     if 'ser' in locals() and ser.is_open:
         ser.close()
-        print("🔌 序列埠已安全關閉。")
+        print("🔌 序列埠埠資源已安全釋放。")
