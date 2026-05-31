@@ -6,21 +6,21 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
   <style>
-    /* ── 🌌 終極 Cyberpunk 科技感渲染 ── */
+    /* ── 🌌 終極 Cyberpunk 極簡科技渲染 ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     
     :root { 
       --bg: #050914; 
       --surface: rgba(15, 23, 32, 0.85); 
-      --cyan: #00f0ff; 
+      --main-accent: #ffffff; 
       --green: #39ff14; 
       --red: #ff003c; 
       --blue: #0088ff; 
       --yellow: #f9ca24;
       --purple: #a29bfe;
-      --muted: #4b6584; 
+      --muted: #636e72; 
       --text: #d1d8e0; 
-      --grid-line: rgba(0, 240, 255, 0.05);
+      --grid-line: rgba(255, 255, 255, 0.05);
     }
 
     body { 
@@ -40,7 +40,7 @@
     .container { width: 100%; max-width: 1100px; }
     
     .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; border-bottom: 1px solid var(--grid-line); padding-bottom: 15px; }
-    .header h1 { font-size: 1.8rem; color: var(--cyan); letter-spacing: 3px; text-shadow: 0 0 10px rgba(0, 240, 255, 0.4); text-transform: uppercase; margin-bottom: 5px; }
+    .header h1 { font-size: 1.8rem; color: var(--main-accent); letter-spacing: 3px; text-shadow: 0 0 10px rgba(255, 255, 255, 0.4); text-transform: uppercase; margin-bottom: 5px; }
     
     .status-badge { 
       padding: 6px 16px; border-radius: 4px; border: 1px solid var(--muted); 
@@ -55,7 +55,7 @@
     
     .card { 
       background: var(--surface); 
-      border: 1px solid rgba(0, 240, 255, 0.2); 
+      border: 1px solid rgba(255, 255, 255, 0.1); 
       border-radius: 8px; 
       padding: 20px; 
       cursor: pointer; 
@@ -63,17 +63,16 @@
       backdrop-filter: blur(10px);
       position: relative;
       overflow: hidden;
-      min-height: 180px; /* 保留動態長高，不擋字 */
-      height: auto;      
+      height: 270px; /* 🌟 絕對固定高度，排版絕不混亂 */
       display: flex;
       flex-direction: column;
     }
     .card::before { content: ''; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: var(--muted); transition: 0.3s; }
-    .card:hover { transform: translateY(-5px); border-color: var(--cyan); box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(0, 240, 255, 0.1); }
-    .card:hover::before { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
+    .card:hover { transform: translateY(-5px); border-color: var(--main-accent); box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(255, 255, 255, 0.1); }
+    .card:hover::before { background: var(--main-accent); box-shadow: 0 0 10px var(--main-accent); }
     
-    .card.active { border-color: var(--cyan); box-shadow: 0 0 25px rgba(0, 240, 255, 0.2); background: rgba(0, 240, 255, 0.05); }
-    .card.active::before { background: var(--cyan); box-shadow: 0 0 15px var(--cyan); }
+    .card.active { border-color: var(--main-accent); box-shadow: 0 0 25px rgba(255, 255, 255, 0.2); background: rgba(255, 255, 255, 0.05); }
+    .card.active::before { background: var(--main-accent); box-shadow: 0 0 15px var(--main-accent); }
     
     .hidden { display: none !important; }
 
@@ -86,18 +85,18 @@
     
     .signal-bars.excellent .bar { background: var(--green); border-color: transparent; box-shadow: 0 0 5px var(--green); }
     .signal-bars.good .bar { border-color: transparent; }
-    .signal-bars.good .bar-1, .signal-bars.good .bar-2, .signal-bars.good .bar-3 { background: var(--cyan); box-shadow: 0 0 5px var(--cyan); }
+    .signal-bars.good .bar-1, .signal-bars.good .bar-2, .signal-bars.good .bar-3 { background: var(--main-accent); box-shadow: 0 0 5px var(--main-accent); }
     .signal-bars.fair .bar { border-color: transparent; }
     .signal-bars.fair .bar-1, .signal-bars.fair .bar-2 { background: var(--yellow); box-shadow: 0 0 5px var(--yellow); }
     .signal-bars.poor .bar { border-color: transparent; }
     .signal-bars.poor .bar-1 { background: var(--muted); box-shadow: 0 0 5px var(--muted); }
     
-    .data-section { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; margin-bottom: 10px; }
-    .divider { width: 100%; height: 1px; background: rgba(0, 240, 255, 0.1); margin: 5px 0 10px 0; border-top: 1px dashed rgba(0, 240, 255, 0.2); }
+    .data-section { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; margin-bottom: 5px; }
+    .divider { width: 100%; height: 1px; background: rgba(255, 255, 255, 0.05); margin: 5px 0 10px 0; border-top: 1px dashed rgba(255, 255, 255, 0.1); }
     
     .val-item { flex: 1 1 40%; }
-    .val-label { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
     .val-num { font-size: 1.6rem; font-weight: bold; text-shadow: 0 0 10px currentColor; }
+    .val-label { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
 
     .card-meta { font-size: 0.6rem; color: var(--muted); display: flex; justify-content: space-between; margin-top: auto; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.03); }
 
@@ -106,28 +105,27 @@
     .skeleton::after { content: " "; display: block; height: 100%; }
 
     .chart-panel { 
-      background: var(--surface); border-radius: 8px; border: 1px solid var(--cyan); 
-      box-shadow: 0 0 30px rgba(0, 240, 255, 0.1); max-height: 0; opacity: 0; overflow: hidden; 
+      background: var(--surface); border-radius: 8px; border: 1px solid var(--main-accent); 
+      box-shadow: 0 0 30px rgba(255, 255, 255, 0.05); max-height: 0; opacity: 0; overflow: hidden; 
       transition: all 0.5s cubic-bezier(0.25, 0.8, 0.25, 1); margin-top: 20px; 
     }
     .chart-panel.show { max-height: 600px; opacity: 1; padding: 20px; }
 
-    .chart-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 15px; border-bottom: 1px dashed rgba(0, 240, 255, 0.3); margin-bottom: 15px; }
+    .chart-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 15px; border-bottom: 1px dashed rgba(255, 255, 255, 0.2); margin-bottom: 15px; }
     
     .chart-scroll-box { width: 100%; overflow-x: auto; background: #02040a; border-radius: 4px; padding: 10px; border: 1px solid #111b27; }
     .chart-scroll-box::-webkit-scrollbar { height: 8px; }
-    .chart-scroll-box::-webkit-scrollbar-thumb { background: var(--cyan); border-radius: 4px; }
+    .chart-scroll-box::-webkit-scrollbar-thumb { background: var(--main-accent); border-radius: 4px; }
     .chart-scroll-box::-webkit-scrollbar-track { background: #02040a; }
     .chart-content { min-width: 1200px; height: 350px; position: relative; } 
 
     .btn { 
-      background: transparent; border: 1px solid var(--cyan); color: var(--cyan); 
+      background: transparent; border: 1px solid var(--main-accent); color: var(--main-accent); 
       padding: 6px 15px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; 
-      text-transform: uppercase; transition: 0.3s; box-shadow: inset 0 0 5px rgba(0,240,255,0.2);
+      text-transform: uppercase; transition: 0.3s; box-shadow: inset 0 0 5px rgba(255,255,255,0.1);
     }
-    .btn:hover { background: var(--cyan); color: #000; box-shadow: 0 0 15px var(--cyan); }
+    .btn:hover { background: var(--main-accent); color: #000; box-shadow: 0 0 15px var(--main-accent); }
     
-    /* 🌟 單純將 CLOSE 按鈕改為危險紅色 */
     .btn-danger { border-color: var(--red); color: var(--red); box-shadow: inset 0 0 5px rgba(255, 0, 60, 0.2); }
     .btn-danger:hover { background: var(--red); color: #fff; box-shadow: 0 0 15px var(--red); }
   </style>
@@ -162,10 +160,12 @@
 </div>
 
 <script>
+// ── 動態配置區 ──
 let SENSOR_CONFIG = {}; 
 let activeNode = null;
 let chart = null;
 
+// ── 動態生成 UI 骨架 (優化自然排序版) ──
 function initCards() {
   const grid = document.getElementById('scada-grid');
   grid.innerHTML = ''; 
@@ -180,8 +180,9 @@ function initCards() {
     
     if (activeNode === id) card.classList.add('active');
     
-    const envSensors = conf.sensors.filter(s => s !== 'loss' && s !== 'snr');
-    const netSensors = conf.sensors.filter(s => s === 'loss' || s === 'snr');
+    // 區分環境數據與通訊指標
+    const envSensors = conf.sensors.filter(s => s !== 'mcount' && s !== 'snr' && s !== 'loss');
+    const netSensors = conf.sensors.filter(s => s === 'mcount' || s === 'snr' || s === 'loss');
     
     let html = `
       <div class="card-title-row">
@@ -206,9 +207,11 @@ function initCards() {
     if (netSensors.length > 0) {
       html += `<div class="divider"></div><div class="data-section">`;
       netSensors.forEach(s => {
+        // 如果是 mcount 標籤，畫面上顯示為 M_NO (流水號縮寫)
+        const displayLabel = s === 'mcount' ? 'M_NO' : s.toUpperCase();
         html += `
           <div class="val-item">
-            <div class="val-label">${s.toUpperCase()}</div>
+            <div class="val-label">${displayLabel}</div>
             <div class="val-num skeleton" style="color:var(--text)"><span id="${id}-${s}">--</span></div>
           </div>`;
       });
@@ -225,6 +228,7 @@ function initCards() {
   });
 }
 
+// ── 初始化圖表 ──
 try {
   const ctx = document.getElementById('myChart').getContext('2d');
   Chart.defaults.color = '#64748b';
@@ -236,10 +240,10 @@ try {
       responsive: true, maintainAspectRatio: false,
       plugins: { 
         legend: { display: false },
-        tooltip: { backgroundColor: 'rgba(5, 9, 20, 0.9)', titleColor: '#00f0ff', borderColor: '#00f0ff', borderWidth: 1 }
+        tooltip: { backgroundColor: 'rgba(5, 9, 20, 0.9)', titleColor: '#ffffff', borderColor: '#ffffff', borderWidth: 1 }
       }, 
       scales: {
-        x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } }
+        x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#64748b' } }
       }
     }
   });
@@ -263,6 +267,7 @@ function toggleChart(id) {
   fetchData(); 
 }
 
+// 🌟 【Bug 修正】拔除錯誤的 .remove('show')，捍衛網頁二次點擊時的 DOM 生命週期
 function closeChart() { 
   activeNode = null; 
   document.getElementById('chart-panel').classList.remove('show'); 
@@ -274,6 +279,7 @@ function closeChart() {
   }, 300); 
 }
 
+// ── 🛡️ 智慧防禦型圖表繪製 ──
 function renderChart(id, h) {
   if (!chart || !SENSOR_CONFIG[id]) return; 
   
@@ -285,20 +291,22 @@ function renderChart(id, h) {
     
     const datasets = [];
     const legendBox = document.getElementById('legend-container');
-    legendBox.innerHTML = `<span style="color:var(--cyan); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
+    legendBox.innerHTML = `<span style="color:var(--main-accent); font-weight:bold; border-right:2px solid var(--muted); padding-right:15px;">DATA STREAM // ${SENSOR_CONFIG[id].name}</span>`;
     
-    const colorMap = { temp: '#f9ca24', hum: '#00f0ff', co2: '#39ff14', pm25: '#39ff14', pm10: '#f9ca24', t: '#f9ca24', h: '#00f0ff', c: '#39ff14' };
+    // 🌟 修正：對齊環境縮寫與標準全名，補齊極簡白的主視覺色系映射
+    const colorMap = { temp: '#f9ca24', hum: '#39ff14', co2: '#ffffff', pm25: '#ffffff', pm10: '#f9ca24', t: '#f9ca24', h: '#39ff14', c: '#ffffff' };
     
-    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'loss' && k !== 'snr');
+    // 固定排除圖表上的通訊與流水號欄位，保持環境數據 Y 軸刻度精準不被拉扁
+    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'mcount' && k !== 'snr' && k !== 'loss');
     
     chart.options.scales = {
-      x: { grid: { color: 'rgba(0, 240, 255, 0.05)' }, ticks: { color: '#64748b' } },
+      x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#64748b' } },
       y: { display: false, position: 'left', grid: { drawOnChartArea: true }, ticks: {} },
       y1: { display: false, position: 'right', grid: { drawOnChartArea: false }, ticks: {} }
     };
 
     keys.forEach((k) => {
-      const color = colorMap[k] || '#00d2ff';
+      const color = colorMap[k] || '#ffffff';
       legendBox.innerHTML += `<span style="color:${color}; text-shadow:0 0 5px ${color};">■ ${k.toUpperCase()}</span>`;
       
       let axisId = (k === 't' || k === 'h' || k === 'temp' || k === 'hum') ? 'y1' : 'y';
@@ -348,6 +356,7 @@ function renderChart(id, h) {
   }
 }
 
+// ── 自動化數據獲取與動態解析 ──
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
@@ -356,6 +365,7 @@ async function fetchData() {
 
     let configChanged = false;
 
+    // 自動偵測未知節點與感測器
     Object.keys(data).forEach(key => {
       if (key.match(/^s\d+_[a-z0-9]+$/i) && !key.includes('rssi') && !key.includes('r_in')) {
         const parts = key.split('_');
@@ -379,6 +389,7 @@ async function fetchData() {
       initCards();
     }
 
+    // 數據更新寫入 UI
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
       let nodeActive = false; 
 
@@ -391,8 +402,8 @@ async function fetchData() {
             nodeActive = true; 
             spanEl.parentElement.classList.remove('skeleton'); 
             
-            // 🌟 保留紫色的 SNR 與紅色的 LOSS，其他配回原色
-            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--cyan)' : s === 'loss' ? 'var(--red)' : s === 'snr' ? 'var(--purple)' : 'var(--green)';
+            // 🌟 欄位警示色分流：MCOUNT 與 LOSS、SNR 設為紅色警示，其餘回歸高質感主題色
+            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--green)' : (s === 'mcount' || s === 'snr' || s === 'loss') ? 'var(--red)' : 'var(--main-accent)';
             spanEl.parentElement.style.color = color;
           }
         }
@@ -431,6 +442,7 @@ async function fetchData() {
   } catch(e) {}
 }
 
+// ── Excel 完美匯出 ──
 function exportExcel() {
   if (!activeNode) return;
   fetch('/api/all_data').then(res => res.json()).then(data => {

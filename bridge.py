@@ -8,11 +8,8 @@ COM_PORT = 'COM6' # ⚠️ 請根據你電腦的裝置管理員確認你的 COM 
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
 
-# 🌟 合法感測器白名單（確認補齊 'snr' 與 'loss'）
-VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'loss', 'snr']
-
-# 🌟 全域變數：儲存修正後的動態統計追蹤器
-node_stats = {}
+# 🌟 將 loss 改為 mcount，作為合法感測器白名單
+VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'mcount', 'snr']
 
 def extract_universal(raw_str):
     parts = raw_str.split(',')
@@ -39,18 +36,19 @@ def extract_universal(raw_str):
                     current_node = match.group(1)
                     break
 
-    # 2. 抓取有效感測數據
+    # 2. 抓取有效感測數據 (優化過濾條件，防範欄位遺漏)
     for i in range(len(parts)):
         item = parts[i].strip().lower()
         
-        if "via" in item or "_m" in item or re.match(r'^l\d+$', item): 
+        # 僅排除純路徑標籤與節點定義字串，避免誤殺內含的感測數據項目
+        if "via" in item or re.match(r'^l\d+$', item): 
             continue
-        
+            
         if re.match(r'^s\d+$', item):
             continue
             
         for sensor in VALID_SENSORS:
-            if item.endswith(sensor) and i + 1 < len(parts):
+            if item == sensor and i + 1 < len(parts):  # 使用精確精準匹配
                 val = parts[i+1].strip()
                 if re.match(r'^-?\d+(\.\d+)?$', val):
                     batch_data[sensor] = val
@@ -68,52 +66,18 @@ def extract_universal(raw_str):
                     batch_data['rssi'] = val
                     break
 
-    # 4. 抓取 SNR (支援小數點與負數)
+    # 4. 抓取 SNR
     snr_match = re.search(r'snr\s*[:=]?\s*(-?\d+(\.\d+)?)', raw_str, re.IGNORECASE)
     if snr_match:
         batch_data['snr'] = snr_match.group(1)
     
     # ========================================================
-    # 🌟 5. 核心演算法修正：防禦重複封包污染
+    # 🌟 直接裝編號：流水號直傳雲端，降低網關運算開銷
     # ========================================================
-    if current_node != "unknown":
-        if mcount is not None:
-            if current_node not in node_stats:
-                # 第一次成功接收該節點的封包：記錄起點流水號
-                node_stats[current_node] = {
-                    'first_m': mcount, 
-                    'last_m': mcount, 
-                    'received_count': 1,
-                    'last_loss': "0.0"
-                }
-                batch_data['loss'] = "0.0"
-            else:
-                stats = node_stats[current_node]
-                
-                if mcount < stats['last_m']:
-                    # 異常防禦：流水號變小，代表 Arduino 被重開機了，統計器歸零重新出發
-                    stats['first_m'] = mcount
-                    stats['last_m'] = mcount
-                    stats['received_count'] = 1
-                    stats['last_loss'] = "0.0"
-                    batch_data['loss'] = "0.0"
-                elif mcount == stats['last_m']:
-                    # 🛡️ 關鍵修正：重複封包，直接繼承上一次計算出來的有效流失率，不重複累加
-                    batch_data['loss'] = stats['last_loss']
-                else:
-                    # 正常遞增：更新最新流水號，實際收到總數 +1
-                    stats['last_m'] = mcount
-                    stats['received_count'] += 1
-                    
-                    expected_total = stats['last_m'] - stats['first_m'] + 1
-                    if expected_total > 0:
-                        loss_rate = ((expected_total - stats['received_count']) / expected_total) * 100
-                        if loss_rate < 0: loss_rate = 0.0
-                        stats['last_loss'] = f"{loss_rate:.1f}"
-                        batch_data['loss'] = stats['last_loss']
-        else:
-            # 🛡️ 關鍵修正：如果該封包沒帶 _m 流水號（舊節點），防呆給予 0.0 避免前端顯示空值
-            batch_data['loss'] = "0.0"
+    if mcount is not None:
+        batch_data['mcount'] = str(mcount)
+    elif 'mcount' not in batch_data:
+        batch_data['mcount'] = "0" # 防呆
 
     return current_node, batch_data
 
@@ -125,28 +89,36 @@ except Exception as e:
     print(f"❌ 無法開啟序列埠: {e}")
     exit()
 
-while True:
-    if ser.in_waiting > 0:
-        try:
-            line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if "數據:" not in line: 
-                continue
-            
-            payload_str = line.split("數據:")[1].strip()
-            print(f"📥 原始數據: {payload_str}") 
-            
-            node_id, data_package = extract_universal(payload_str)
+try:
+    while True:
+        if ser.in_waiting > 0:
+            try:
+                line = ser.readline().decode('utf-8', errors='ignore').strip()
+                if "數據:" not in line: 
+                    continue
+                
+                payload_str = line.split("數據:")[1].strip()
+                print(f"📥 原始數據: {payload_str}") 
+                
+                node_id, data_package = extract_universal(payload_str)
 
-            if data_package and node_id != "unknown":
-                payload = {"node": node_id, "data": data_package}
-                try:
-                    res = requests.post(RENDER_URL, json=payload, timeout=8)
-                    if res.status_code == 200 or res.status_code == 201:
-                        print(f"🚀 [傳送成功] {node_id}: {data_package}")
-                    else:
-                        print(f"⚠️ [狀態異常] 代碼: {res.status_code}")
-                except:
-                    print(f"📡 伺服器連線中...")
-        except Exception as e:
-            print(f"⚠️ 解析異常: {e}")
-    time.sleep(0.01)
+                if data_package and node_id != "unknown":
+                    payload = {"node": node_id, "data": data_package}
+                    try:
+                        # ⚠️ Render 免費版有休眠機制，初次連線可能需較長回應時間，此處超時設為 8 秒
+                        res = requests.post(RENDER_URL, json=payload, timeout=8)
+                        if res.status_code in [200, 201]:
+                            print(f"🚀 [傳送成功] {node_id}: {data_package}")
+                        else:
+                            print(f"⚠️ [伺服器異常] 狀態碼: {res.status_code}")
+                    except requests.RequestException as req_err:
+                        print(f"🌐 [網路傳輸失敗] 無法連線至 Render: {req_err}")
+            except Exception as e:
+                print(f"⚠️ 解析異常: {e}")
+        time.sleep(0.01)
+except KeyboardInterrupt:
+    print("\n🛑 收到終止訊號，正在安全關閉 LoRa 網關...")
+finally:
+    if 'ser' in locals() and ser.is_open:
+        ser.close()
+        print("🔌 序列埠已安全關閉。")
