@@ -9,9 +9,6 @@ COM_PORT = 'COM6' # ⚠️ 請根據你電腦的裝置管理員確認你的 COM 
 BAUD_RATE = 115200
 RENDER_URL = "https://ysz.onrender.com/update"
 
-# 🌟 合法感測器白名單（維持與前端完全對齊）
-VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'mcount', 'snr']
-
 # 🌟 全域變數：儲存每個節點上一次成功收到的 MCOUNT 編號
 last_mcount_tracker = {}
 
@@ -57,23 +54,27 @@ def extract_universal(raw_str):
                 stats["lost"] += (mcount - prev_mcount - 1)
             last_mcount_tracker[current_node] = mcount
 
-    # 2. 抓取有效感測數據 (🛡️ 精確化防禦修復：防範 _m 特徵誤殺數據)
+    # 2. 抓取有效感測數據
+    # 🌟 免設定新增感測器：不再依賴固定白名單，只要韌體用「代號,數值」格式送出，
+    # 這裡就會自動收下並直接以該代號作為 key，之後在韌體端新增感測器不用再回頭改這支程式。
+    # 只排除明確是路徑／節點資訊、不可能是感測器代號的 token。
     for i in range(len(parts)):
         item = parts[i].strip().lower()
-        
+
         # 只過濾純路徑與純節點前綴，放行包含感測數據的鍵值對
-        if "via" in item or re.match(r'^l\d+$', item): 
+        if "via" in item or re.match(r'^l\d+$', item):
             continue
-        if re.match(r'^s\d+$', item):
+        if re.match(r'^s\d+(_m\d+)?$', item):
             continue
-            
-        for sensor in VALID_SENSORS:
-            # ✨ 精確對齊：直接匹配感測器 Key
-            if item == sensor and i + 1 < len(parts):
-                val = parts[i+1].strip()
-                if re.match(r'^-?\d+(\.\d+)?$', val):
-                    batch_data[sensor] = val
-                    break 
+        # 代號必須是英文字母開頭的識別碼（避免把數值本身或其他雜訊 token 誤判成代號）
+        if not re.match(r'^[a-z][a-z0-9_]*$', item):
+            continue
+        if i + 1 >= len(parts):
+            continue
+
+        val = parts[i + 1].strip()
+        if re.match(r'^-?\d+(\.\d+)?$', val):
+            batch_data[item] = val
 
     # 3. 抓取最後一跳 RSSI
     rssi_match = re.search(r'rssi\s*[:=]?\s*(-?\d+)', raw_str, re.IGNORECASE)
