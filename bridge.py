@@ -20,6 +20,9 @@ VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'mcount
 # 🌟 全域變數：儲存每個節點上一次成功收到的 MCOUNT 編號
 last_mcount_tracker = {}
 
+# 🌟 全域變數：每個節點的封包遺失統計（自閘道器本次啟動後累計）
+node_loss_stats = {}  # node_id -> {"received": int, "lost": int}
+
 def init_local_cache():
     """ 初始化本地快取資料庫 """
     conn = sqlite3.connect(LOCAL_DB, timeout=10)
@@ -147,6 +150,12 @@ def extract_universal(raw_str):
             print(f"🛡️ [閘道器防禦] 攔截 {current_node} 重複編號 M{mcount}，丟棄該重複封包。")
             return current_node, {} # 回傳空字典，阻斷後續發送
         else:
+            # 🌟 封包遺失率統計：MCOUNT 出現跳號代表中間有封包遺失
+            prev_mcount = last_mcount_tracker.get(current_node)
+            stats = node_loss_stats.setdefault(current_node, {"received": 0, "lost": 0})
+            stats["received"] += 1
+            if prev_mcount is not None and mcount > prev_mcount + 1:
+                stats["lost"] += (mcount - prev_mcount - 1)
             last_mcount_tracker[current_node] = mcount
 
     # 2. 抓取有效感測數據 (🛡️ 精確化防禦修復：防範 _m 特徵誤殺數據)
@@ -189,6 +198,13 @@ def extract_universal(raw_str):
         batch_data['mcount'] = str(mcount)
     elif 'mcount' not in batch_data:
         batch_data['mcount'] = "0"
+
+    # 裝填封包遺失率（自本次啟動累計，百分比，四捨五入到小數點後 1 位）
+    if current_node in node_loss_stats:
+        stats = node_loss_stats[current_node]
+        total = stats["received"] + stats["lost"]
+        loss_pct = round(stats["lost"] / total * 100, 1) if total > 0 else 0.0
+        batch_data['loss'] = str(loss_pct)
 
     return current_node, batch_data
 
