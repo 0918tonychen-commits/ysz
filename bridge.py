@@ -11,6 +11,8 @@ BAUD_RATE = 115200
 RENDER_URL = "https://ysz.onrender.com/update"
 LOCAL_DB = "gateway_cache.db"
 MAX_CACHE_ROWS = 5000  # 快取上限保護，防止空間撐爆
+FLUSH_BATCH_LIMIT = 10  # 每次補傳最多處理筆數，避免大量補傳時卡住序列埠讀取
+MAX_ROW_RETRIES = 5     # 單筆資料連續遭後端拒絕的上限，超過視為異常封包並捨棄
 
 # 🌟 合法感測器白名單（維持與前端完全對齊）
 VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'mcount', 'snr']
@@ -27,9 +29,15 @@ def init_local_cache():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             node_id TEXT,
             payload TEXT,
-            timestamp REAL
+            timestamp REAL,
+            retries INTEGER DEFAULT 0
         )
     ''')
+    # 相容舊版資料庫：若是舊檔案沒有 retries 欄位，補上去
+    cursor.execute("PRAGMA table_info(cache)")
+    existing_cols = [c[1] for c in cursor.fetchall()]
+    if "retries" not in existing_cols:
+        cursor.execute("ALTER TABLE cache ADD COLUMN retries INTEGER DEFAULT 0")
     conn.commit()
     conn.close()
 
@@ -63,17 +71,22 @@ def save_to_local_cache(node_id, data_payload):
             conn.close()
 
 def flush_local_cache():
-    """ 邏輯：當網路恢復時，自動以非阻塞/快速的形式續傳歷史數據 """
+    """ 邏輯：當網路恢復時，以節流方式分批續傳歷史數據，避免長時間阻塞序列埠讀取 """
     try:
         conn = sqlite3.connect(LOCAL_DB, timeout=10)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, node_id, payload, timestamp FROM cache ORDER BY id ASC")
+        cursor.execute(
+            "SELECT id, node_id, payload, timestamp, retries FROM cache ORDER BY id ASC LIMIT ?",
+            (FLUSH_BATCH_LIMIT,)
+        )
         cached_rows = cursor.fetchall()
-        
+
         if cached_rows:
-            print(f"🔄 [網關自癒] 連線已恢復！開始補傳歷史數據（剩餘 {len(cached_rows)} 筆）...")
+            cursor.execute("SELECT COUNT(*) FROM cache")
+            remaining = cursor.fetchone()[0]
+            print(f"🔄 [網關自癒] 連線已恢復！本輪補傳 {len(cached_rows)} 筆（佇列總計剩餘 {remaining} 筆）...")
             for row in cached_rows:
-                db_id, node_id, payload_str, recorded_at = row
+                db_id, node_id, payload_str, recorded_at, retries = row
                 post_payload = {
                     "node": node_id,
                     "data": json.loads(payload_str),
@@ -85,8 +98,15 @@ def flush_local_cache():
                         cursor.execute("DELETE FROM cache WHERE id = ?", (db_id,))
                         conn.commit() # 即時提交，防止中斷時整批回滾
                     else:
-                        print(f"⚠️ [網關自癒] 後端 API 回應異常代碼 {res.status_code}，終止本次補傳。")
-                        break
+                        retries += 1
+                        if retries >= MAX_ROW_RETRIES:
+                            print(f"❌ [網關自癒] 第 {db_id} 筆資料連續 {retries} 次遭後端拒絕（狀態碼 {res.status_code}），判定為異常封包並捨棄，不再阻擋後續補傳。")
+                            cursor.execute("DELETE FROM cache WHERE id = ?", (db_id,))
+                        else:
+                            print(f"⚠️ [網關自癒] 第 {db_id} 筆資料遭後端拒絕（狀態碼 {res.status_code}），重試次數 {retries}/{MAX_ROW_RETRIES}，跳過並繼續處理下一筆。")
+                            cursor.execute("UPDATE cache SET retries = ? WHERE id = ?", (retries, db_id))
+                        conn.commit()
+                        # 非網路問題（伺服器有回應但拒絕），不中斷本輪補傳，繼續嘗試佇列中其他資料
                 except requests.RequestException:
                     print("⚠️ [網關自癒] 續傳中斷，雲端連線再度不穩，暫停本次自癒補傳。")
                     break

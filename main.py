@@ -79,8 +79,12 @@ def update():
     sensor_batch = req["data"]
     last_seen[node_id] = time.time()
 
-    # 台灣時間格式化
-    current_time = (datetime.utcnow() + timedelta(hours=8)).strftime("%H:%M:%S")
+    # 優先採用封包自帶的原始時間戳（斷線補傳資料也一樣），確保時間序列不因補傳而錯亂
+    try:
+        event_dt = datetime.utcfromtimestamp(float(req["recorded_at"]))
+    except (KeyError, TypeError, ValueError):
+        event_dt = datetime.utcnow()
+    current_time = (event_dt + timedelta(hours=8)).strftime("%H:%M:%S")
 
     if node_id not in history_data:
         history_data[node_id] = {"labels": []}
