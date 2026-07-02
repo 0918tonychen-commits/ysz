@@ -264,7 +264,7 @@ function toggleChart(id) {
     }
   });
   document.getElementById('chart-panel').classList.add('show');
-  fetchData(); 
+  fetchDataWithSelfHealing();
 }
 
 function closeChart() { 
@@ -353,11 +353,9 @@ function renderChart(id, h) {
   }
 }
 
-// ── 自動化數據獲取與動態解析 ──
-async function fetchData() {
+// ── 動態解析：把後端回傳的 JSON 畫進 UI（純渲染，不碰網路）──
+function updateDashboardUI(responseData) {
   try {
-    const res = await fetch('/api/all_data');
-    const responseData = await res.json();
     const nowTime = new Date().toLocaleTimeString('zh-TW', { hour12: false });
 
     // 100% 精準對齊後端持久化資料庫回傳格式
@@ -388,7 +386,7 @@ async function fetchData() {
 
     // 數據更新寫入 UI
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
-      let nodeActive = false; 
+      let nodeActive = false;
       const nodeLatest = latestData[id];
 
       if (nodeLatest) {
@@ -396,7 +394,7 @@ async function fetchData() {
         const currentMcountVal = nodeLatest.mcount;
         if (currentMcountVal !== undefined && currentMcountVal !== null) {
           if (lastReceivedMcount[id] === currentMcountVal) {
-            nodeActive = true; 
+            nodeActive = true;
           } else {
             lastReceivedMcount[id] = currentMcountVal;
           }
@@ -408,9 +406,9 @@ async function fetchData() {
             const val = nodeLatest[s];
             if (val !== undefined && val !== null) {
               spanEl.textContent = val;
-              nodeActive = true; 
-              spanEl.parentElement.classList.remove('skeleton'); 
-              
+              nodeActive = true;
+              spanEl.parentElement.classList.remove('skeleton');
+
               const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--green)' : (s === 'mcount' || s === 'snr' || s === 'loss') ? 'var(--red)' : 'var(--main-accent)';
               spanEl.parentElement.style.color = color;
             }
@@ -423,7 +421,7 @@ async function fetchData() {
 
         if (nodeActive) {
           timeEl.textContent = nowTime;
-          timeEl.classList.remove('skeleton'); 
+          timeEl.classList.remove('skeleton');
           statusEl.textContent = 'ONLINE';
           statusEl.style.color = 'var(--green)';
 
@@ -432,29 +430,98 @@ async function fetchData() {
           if (rssi > -70) quality = 'excellent';
           else if (rssi > -85) quality = 'good';
           else if (rssi > -100) quality = 'fair';
-          
+
           signalEl.className = `signal-bars ${quality}`;
           signalEl.title = `RSSI: ${Math.round(rssi)} dBm`;
         } else {
           statusEl.textContent = 'PENDING...';
           statusEl.style.color = 'var(--muted)';
-          signalEl.className = 'signal-bars'; 
+          signalEl.className = 'signal-bars';
         }
-        if(signalEl) signalEl.classList.remove('skeleton'); 
+        if(signalEl) signalEl.classList.remove('skeleton');
       }
     });
 
     const isOnline = responseData.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
-    
+
     // 🌟 【核心修復】：免除前端重複遍歷去重負擔，直接交由後台強健資料庫驅動，大幅釋放 CPU 壓力
     if(activeNode && historyData[activeNode]) {
       renderChart(activeNode, historyData[activeNode]);
     }
   } catch(e) {
-    console.error("更新異常擷取:", e);
+    console.error("畫面更新異常:", e);
   }
+}
+
+// ── 🛡️ 自癒型資料獲取：逾時保護、失敗退避重試（含 jitter）、避免重疊請求 ──
+let retryDelay = 2000;         // 目前重試等待時間，初始 2 秒
+const MAX_RETRY_DELAY = 30000; // 重試上限：30 秒
+const FETCH_TIMEOUT = 8000;    // 單次請求逾時，避免伺服器休眠/無回應時無限卡住
+const POLL_INTERVAL = 3000;    // 正常輪詢間隔：3 秒
+
+let pollTimer = null;          // 目前排定的輪詢計時器，避免重疊排程
+let inFlightController = null; // 追蹤目前飛行中的請求，發起新請求時可主動中止舊請求
+
+function fetchDataWithSelfHealing() {
+  // 核心防禦：發起新輪詢前，無條件清除舊定時器
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+  }
+
+  // 若前一個請求還在飛行中（例如被外部手動觸發、逾時尚未被判定），中止它，
+  // 避免舊請求晚回來覆蓋新資料，造成競態問題
+  if (inFlightController) {
+    inFlightController.abort();
+  }
+
+  const controller = new AbortController();
+  inFlightController = controller;
+
+  // 手動逾時控制：fetch 本身不會自己逾時，若後端建立連線後卡住不回應，靠這段主動中止
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+  fetch('/api/all_data', { signal: controller.signal })
+    .then(response => {
+      clearTimeout(timeoutId);
+      if (!response.ok) {
+        throw new Error("伺服器端回應非 200 狀態");
+      }
+      return response.json();
+    })
+    .then(data => {
+      // 恢復成功：連線與資料格式完全正常，徹底重置退避間隔
+      retryDelay = 2000;
+      updateDashboardUI(data);
+
+      // 設定下一次正常輪詢
+      pollTimer = setTimeout(fetchDataWithSelfHealing, POLL_INTERVAL);
+    })
+    .catch(error => {
+      clearTimeout(timeoutId);
+
+      // 排除「主動中止」造成的假錯誤，避免中止動作被誤判為連線異常並觸發不必要的重試訊息
+      if (error.name === 'AbortError' && controller !== inFlightController) {
+        // 這是被更新的請求取代而中止的舊請求，不需要進入重試邏輯
+        return;
+      }
+
+      const reason = error.name === 'AbortError' ? '請求逾時未回應' : error.message;
+
+      // 先計算出這一次要等待的精確時間，確保後續一致性
+      const baseDelay = retryDelay;
+      // 加入隨機抖動（jitter），避免大量斷線的客戶端在恢復瞬間同時重試造成雷擊風暴
+      const currentDelay = Math.round(baseDelay * (0.5 + Math.random()));
+
+      console.log(`⚠️ [前端自癒] 連線或資料異常: ${reason}。將於約 ${(currentDelay / 1000).toFixed(1)} 秒後自動重試...`);
+
+      // 排定下一次的自癒重試計時器
+      pollTimer = setTimeout(fetchDataWithSelfHealing, currentDelay);
+
+      // 更新下一次的退避乘數，上限鎖死在 MAX_RETRY_DELAY
+      retryDelay = Math.min(baseDelay * 2, MAX_RETRY_DELAY);
+    });
 }
 
 // ── Excel 完美匯出 ──
@@ -485,8 +552,15 @@ function exportExcel() {
   });
 }
 
-fetchData(); 
-setInterval(fetchData, 3000);
+fetchDataWithSelfHealing();
+
+// 分頁重新變回可見時（例如切回背景分頁），立即刷新一次，
+// 避免瀏覽器在背景分頁節流 setTimeout 導致畫面停留在舊資料
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    fetchDataWithSelfHealing();
+  }
+});
 </script>
 </body>
 </html>
