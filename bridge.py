@@ -2,17 +2,99 @@ import serial
 import requests
 import time
 import re
+import sqlite3
+import json
 
 # --- 配置區 ---
 COM_PORT = 'COM6' # ⚠️ 請根據你電腦的裝置管理員確認你的 COM Port 號碼
 BAUD_RATE = 115200 
 RENDER_URL = "https://ysz.onrender.com/update"
+LOCAL_DB = "gateway_cache.db"
+MAX_CACHE_ROWS = 5000  # 快取上限保護，防止空間撐爆
 
 # 🌟 合法感測器白名單（維持與前端完全對齊）
 VALID_SENSORS = ['t', 'h', 'c', 'pm25', 'pm10', 'v', 'p', 'lux', 'r_in', 'mcount', 'snr']
 
 # 🌟 全域變數：儲存每個節點上一次成功收到的 MCOUNT 編號
 last_mcount_tracker = {}
+
+def init_local_cache():
+    """ 初始化本地快取資料庫 """
+    conn = sqlite3.connect(LOCAL_DB, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT,
+            payload TEXT,
+            timestamp REAL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def save_to_local_cache(node_id, data_payload):
+    """ 當雲端斷網時，自主防禦轉存至本地 SQLite 確保數據不遺失 """
+    print(f"📦 [網關容錯] 遠端連線異常，封包自主存入本地 SQLite 快取。")
+    try:
+        conn = sqlite3.connect(LOCAL_DB, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO cache (node_id, payload, timestamp) VALUES (?, ?, ?)",
+            (node_id, json.dumps(data_payload), time.time())
+        )
+        conn.commit()
+
+        # 快取筆數上限保護
+        cursor.execute("SELECT COUNT(*) FROM cache")
+        total = cursor.fetchone()[0]
+        if total > MAX_CACHE_ROWS:
+            overflow = total - MAX_CACHE_ROWS
+            cursor.execute(
+                "DELETE FROM cache WHERE id IN (SELECT id FROM cache ORDER BY id ASC LIMIT ?)",
+                (overflow,)
+            )
+            conn.commit()
+            print(f"⚠️ [網關容錯] 快取超過上限，已捨棄最舊 {overflow} 筆資料。")
+    except sqlite3.Error as e:
+        print(f"❌ [快取失敗] 資料庫錯誤: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+def flush_local_cache():
+    """ 邏輯：當網路恢復時，自動以非阻塞/快速的形式續傳歷史數據 """
+    try:
+        conn = sqlite3.connect(LOCAL_DB, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, node_id, payload, timestamp FROM cache ORDER BY id ASC")
+        cached_rows = cursor.fetchall()
+        
+        if cached_rows:
+            print(f"🔄 [網關自癒] 連線已恢復！開始補傳歷史數據（剩餘 {len(cached_rows)} 筆）...")
+            for row in cached_rows:
+                db_id, node_id, payload_str, recorded_at = row
+                post_payload = {
+                    "node": node_id,
+                    "data": json.loads(payload_str),
+                    "recorded_at": recorded_at
+                }
+                try:
+                    res = requests.post(RENDER_URL, json=post_payload, timeout=1.0)
+                    if res.status_code in [200, 201]:
+                        cursor.execute("DELETE FROM cache WHERE id = ?", (db_id,))
+                        conn.commit() # 即時提交，防止中斷時整批回滾
+                    else:
+                        print(f"⚠️ [網關自癒] 後端 API 回應異常代碼 {res.status_code}，終止本次補傳。")
+                        break
+                except requests.RequestException:
+                    print("⚠️ [網關自癒] 續傳中斷，雲端連線再度不穩，暫停本次自癒補傳。")
+                    break
+    except sqlite3.Error as e:
+        print(f"❌ [補傳失敗] 資料庫讀取異常: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 def extract_universal(raw_str):
     parts = raw_str.split(',')
@@ -91,6 +173,8 @@ def extract_universal(raw_str):
     return current_node, batch_data
 
 # --- 主程序 ---
+init_local_cache()
+
 try:
     ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.1)
     print(f"✅ LoRa 閘道器已啟動: {COM_PORT}")
@@ -113,16 +197,25 @@ try:
 
                 # 🌟 只有在 data_package 內部有感測數據時（未被攔截），才觸發雲端 POST
                 if data_package and node_id != "unknown":
-                    payload = {"node": node_id, "data": data_package}
+                    # 先行嘗試補傳舊快取，以維護時間序列正確性
+                    flush_local_cache()
+                    
+                    # 封裝即時遙測負載與目前時間戳記
+                    payload = {
+                        "node": node_id, 
+                        "data": data_package,
+                        "recorded_at": time.time()
+                    }
                     try:
-                        res = requests.post(RENDER_URL, json=payload, timeout=8)
+                        res = requests.post(RENDER_URL, json=payload, timeout=3.0)
                         if res.status_code in [200, 201]:
                             print(f"🚀 [傳送成功] {node_id}: {data_package}")
                         else:
-                            print(f"⚠️ [伺服器異常] 狀態碼: {res.status_code}")
+                            print(f"⚠️ [伺服器異常] 狀態碼: {res.status_code}，切換為本地儲存模式。")
+                            save_to_local_cache(node_id, data_package)
                     except requests.RequestException as req_err:
-                        # 顯性錯誤輸出，極大地方便場域實測時的網路狀況除錯
-                        print(f"🌐 [傳輸超時/失敗] 正在等待雲端伺服器響應或喚醒: {req_err}")
+                        print(f"🌐 [傳輸超時/失敗] 伺服器無響應，資料已進行本地防禦暫存: {req_err}")
+                        save_to_local_cache(node_id, data_package)
             except Exception as e:
                 print(f"⚠️ 解析異常: {e}")
         time.sleep(0.01)

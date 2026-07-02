@@ -294,8 +294,7 @@ function renderChart(id, h) {
     
     const colorMap = { temp: '#f9ca24', hum: '#39ff14', co2: '#ffffff', pm25: '#ffffff', pm10: '#f9ca24', t: '#f9ca24', h: '#39ff14', c: '#ffffff' };
     
-    // 🌟 【正確對齊修正】：同步過濾清單，納入新指標 'loss'，阻止其破壞環境資料 Y 軸
-    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'r_in' && k !== 'mcount' && k !== 'snr' && k !== 'loss');
+    const keys = Object.keys(h).filter(k => k !== 'labels' && k !== 'rssi' && k !== 'mcount' && k !== 'snr' && k !== 'loss');
     
     chart.options.scales = {
       x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#64748b' } },
@@ -358,29 +357,29 @@ function renderChart(id, h) {
 async function fetchData() {
   try {
     const res = await fetch('/api/all_data');
-    const data = await res.json();
+    const responseData = await res.json();
     const nowTime = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+
+    // 100% 精準對齊後端持久化資料庫回傳格式
+    // 預期格式： { "latest": { "s02": {...}, "s03": {...} }, "history": { "s02": {...}, "s03": {...} }, "status": "online" }
+    const latestData = responseData.latest || {};
+    const historyData = responseData.history || {};
 
     let configChanged = false;
 
-    // 自動偵測未知節點與感測器
-    Object.keys(data).forEach(key => {
-      if (key.match(/^s\d+_[a-z0-9]+$/i) && !key.includes('rssi') && !key.includes('r_in')) {
-        const parts = key.split('_');
-        const id = parts[0];     
-        const sensor = parts[1]; 
-        
-        if (!SENSOR_CONFIG[id]) {
-          SENSOR_CONFIG[id] = { name: `NODE_${id.toUpperCase().replace('S', '')}`, icon: '📍', sensors: [] };
-          configChanged = true;
-        }
-        
-        if (!SENSOR_CONFIG[id].sensors.includes(sensor)) {
+    // 自動偵測節點與感測器（由實體最新的資料字典驅動）
+    Object.entries(latestData).forEach(([id, sensorObj]) => {
+      if (!SENSOR_CONFIG[id]) {
+        SENSOR_CONFIG[id] = { name: `NODE_${id.toUpperCase().replace('S', '')}`, icon: '📍', sensors: [] };
+        configChanged = true;
+      }
+      Object.keys(sensorObj).forEach(sensor => {
+        if (sensor !== 'rssi' && sensor !== 'snr' && !SENSOR_CONFIG[id].sensors.includes(sensor)) {
           SENSOR_CONFIG[id].sensors.push(sensor);
           SENSOR_CONFIG[id].sensors.sort();
           configChanged = true;
         }
-      }
+      });
     });
 
     if (configChanged) {
@@ -390,74 +389,82 @@ async function fetchData() {
     // 數據更新寫入 UI
     Object.entries(SENSOR_CONFIG).forEach(([id, conf]) => {
       let nodeActive = false; 
+      const nodeLatest = latestData[id];
 
-      // 攔截控制
-      const currentMcountVal = data[`${id}_mcount`]?.val;
-      if (currentMcountVal !== undefined && currentMcountVal !== null) {
-        if (lastReceivedMcount[id] === currentMcountVal) {
-          nodeActive = true; 
-        } else {
-          lastReceivedMcount[id] = currentMcountVal;
-        }
-      }
-
-      conf.sensors.forEach(s => {
-        const spanEl = document.getElementById(`${id}-${s}`);
-        if(spanEl) {
-          const valData = data[`${id}_${s}`];
-          if (valData) {
-            spanEl.textContent = valData.val;
+      if (nodeLatest) {
+        // 攔截去重控制邏輯
+        const currentMcountVal = nodeLatest.mcount;
+        if (currentMcountVal !== undefined && currentMcountVal !== null) {
+          if (lastReceivedMcount[id] === currentMcountVal) {
             nodeActive = true; 
-            spanEl.parentElement.classList.remove('skeleton'); 
-            
-            const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--green)' : (s === 'mcount' || s === 'snr' || s === 'loss') ? 'var(--red)' : 'var(--main-accent)';
-            spanEl.parentElement.style.color = color;
+          } else {
+            lastReceivedMcount[id] = currentMcountVal;
           }
         }
-      });
 
-      const timeEl = document.getElementById(`${id}-time`);
-      const statusEl = document.getElementById(`${id}-status`);
-      const signalEl = document.getElementById(`${id}-signal`);
+        conf.sensors.forEach(s => {
+          const spanEl = document.getElementById(`${id}-${s}`);
+          if(spanEl) {
+            const val = nodeLatest[s];
+            if (val !== undefined && val !== null) {
+              spanEl.textContent = val;
+              nodeActive = true; 
+              spanEl.parentElement.classList.remove('skeleton'); 
+              
+              const color = s === 't' ? 'var(--yellow)' : s === 'h' ? 'var(--green)' : (s === 'mcount' || s === 'snr' || s === 'loss') ? 'var(--red)' : 'var(--main-accent)';
+              spanEl.parentElement.style.color = color;
+            }
+          }
+        });
 
-      if (nodeActive) {
-        timeEl.textContent = nowTime;
-        timeEl.classList.remove('skeleton'); 
-        statusEl.textContent = 'ONLINE';
-        statusEl.style.color = 'var(--green)';
+        const timeEl = document.getElementById(`${id}-time`);
+        const statusEl = document.getElementById(`${id}-status`);
+        const signalEl = document.getElementById(`${id}-signal`);
 
-        const rssi = data[`${id}_rssi`]?.val ? parseFloat(data[`${id}_rssi`].val) : -100;
-        let quality = 'poor';
-        if (rssi > -70) quality = 'excellent';
-        else if (rssi > -85) quality = 'good';
-        else if (rssi > -100) quality = 'fair';
-        
-        signalEl.className = `signal-bars ${quality}`;
-        signalEl.title = `RSSI: ${Math.round(rssi)} dBm`;
-      } else {
-        statusEl.textContent = 'PENDING...';
-        statusEl.style.color = 'var(--muted)';
-        signalEl.className = 'signal-bars'; 
+        if (nodeActive) {
+          timeEl.textContent = nowTime;
+          timeEl.classList.remove('skeleton'); 
+          statusEl.textContent = 'ONLINE';
+          statusEl.style.color = 'var(--green)';
+
+          const rssi = nodeLatest.rssi ? parseFloat(nodeLatest.rssi) : -100;
+          let quality = 'poor';
+          if (rssi > -70) quality = 'excellent';
+          else if (rssi > -85) quality = 'good';
+          else if (rssi > -100) quality = 'fair';
+          
+          signalEl.className = `signal-bars ${quality}`;
+          signalEl.title = `RSSI: ${Math.round(rssi)} dBm`;
+        } else {
+          statusEl.textContent = 'PENDING...';
+          statusEl.style.color = 'var(--muted)';
+          signalEl.className = 'signal-bars'; 
+        }
+        if(signalEl) signalEl.classList.remove('skeleton'); 
       }
-      if(signalEl) signalEl.classList.remove('skeleton'); 
     });
 
-    const isOnline = data.status === 'online';
+    const isOnline = responseData.status === 'online';
     document.getElementById('status-badge').className = `status-badge ${isOnline ? 'is-online' : ''}`;
     document.getElementById('status-text').textContent = isOnline ? 'SYSTEM.ONLINE' : 'SYSTEM.OFFLINE';
     
     // 🌟 【核心修復】：免除前端重複遍歷去重負擔，直接交由後台強健資料庫驅動，大幅釋放 CPU 壓力
-    if(activeNode && data.history[activeNode]) {
-      renderChart(activeNode, data.history[activeNode]);
+    if(activeNode && historyData[activeNode]) {
+      renderChart(activeNode, historyData[activeNode]);
     }
-  } catch(e) {}
+  } catch(e) {
+    console.error("更新異常擷取:", e);
+  }
 }
 
 // ── Excel 完美匯出 ──
 function exportExcel() {
   if (!activeNode) return;
-  fetch('/api/all_data').then(res => res.json()).then(data => {
-    const hist = data.history[activeNode];
+  fetch('/api/all_data').then(res => res.json()).then(responseData => {
+    const historyData = responseData.history || {};
+    const hist = historyData[activeNode];
+    if (!hist || !hist.labels) return;
+
     const ks = Object.keys(hist).filter(k => k !== 'labels');
     
     let sheetData = [ ["Time", ...ks.map(k => k.toUpperCase())] ];
