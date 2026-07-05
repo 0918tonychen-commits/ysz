@@ -1,15 +1,25 @@
 from flask import Flask, render_template, request, jsonify
 from datetime import datetime, timedelta
 import time
-import sqlite3
 import json
 import os
 import threading
 import requests
+import psycopg
+from dotenv import load_dotenv
 
 app = Flask(__name__)
 
-DB_FILE = "server_data.db"
+# ── 資料庫連線設定（Neon PostgreSQL）──
+# 本機開發：從專案根目錄 .env 讀取；Render 部署：從後台 Environment 讀取。
+# 換成外部資料庫後，重新部署／休眠／重啟都不會再遺失資料。
+load_dotenv()
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "未設定 DATABASE_URL！本機請在專案根目錄的 .env 填入 Neon 連線字串，"
+        "Render 請在服務的 Environment 頁面設定。"
+    )
 
 # ── Discord 警報通知設定 ──
 # Webhook 網址視為機密，優先從環境變數讀取（Render 後台設定）。
@@ -27,48 +37,100 @@ ALERT_RULES = {
 OFFLINE_TIMEOUT = 180     # 節點超過幾秒沒回報就判定離線（3 分鐘）
 ALERT_COOLDOWN = 600      # 同一個警報幾秒內不重複發送（10 分鐘，避免洗版）
 
+# ── 完整歷史紀錄保留設定 ──
+RETENTION_SECONDS = 7 * 24 * 60 * 60  # 保留最近 7 天的完整原始資料
+PRUNE_INTERVAL = 300                  # 每 5 分鐘才真的執行一次清除，避免每個請求都跑 DELETE
+
+# ── 共用資料庫執行器 ──
+# 維持一條長連線重複使用（每次重開連線到 Neon 要多花數百毫秒）；
+# Neon 免費方案閒置一段時間會休眠、喚醒時舊連線會失效，所以失敗時自動重連再試一次。
+_db_lock = threading.Lock()
+_db_conn = None
+
+def db_execute(query, params=None, fetch=False, many=False):
+    global _db_conn
+    with _db_lock:
+        for attempt in (1, 2):
+            try:
+                if _db_conn is None or _db_conn.closed:
+                    _db_conn = psycopg.connect(DATABASE_URL, autocommit=True)
+                with _db_conn.cursor() as cursor:
+                    if many:
+                        cursor.executemany(query, params or [])
+                        return None
+                    cursor.execute(query, params or ())
+                    return cursor.fetchall() if fetch else None
+            except psycopg.OperationalError:
+                # 連線失效（Neon 休眠喚醒或網路中斷）：丟掉舊連線，重連再試一次
+                try:
+                    if _db_conn:
+                        _db_conn.close()
+                except psycopg.Error:
+                    pass
+                _db_conn = None
+                if attempt == 2:
+                    raise
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    db_execute('''
         CREATE TABLE IF NOT EXISTS latest (
             node_id TEXT PRIMARY KEY,
             data TEXT
         )
     ''')
-    cursor.execute('''
+    db_execute('''
         CREATE TABLE IF NOT EXISTS history (
             node_id TEXT PRIMARY KEY,
             data TEXT
         )
     ''')
-    conn.commit()
-    conn.close()
+    # 完整歷史紀錄：每一筆數值都存成獨立一列，不受即時圖表 100 筆上限影響，
+    # 只靠 recorded_at 保留最近 RETENTION_SECONDS（目前 7 天），舊資料自動清除
+    db_execute('''
+        CREATE TABLE IF NOT EXISTS readings (
+            id BIGSERIAL PRIMARY KEY,
+            node_id TEXT NOT NULL,
+            sensor TEXT NOT NULL,
+            value DOUBLE PRECISION NOT NULL,
+            recorded_at DOUBLE PRECISION NOT NULL
+        )
+    ''')
+    db_execute('CREATE INDEX IF NOT EXISTS idx_readings_node_time ON readings (node_id, recorded_at)')
 
 def load_state():
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    cursor = conn.cursor()
-    latest = {node_id: json.loads(data) for node_id, data in cursor.execute("SELECT node_id, data FROM latest")}
-    history = {node_id: json.loads(data) for node_id, data in cursor.execute("SELECT node_id, data FROM history")}
-    conn.close()
+    latest = {node_id: json.loads(data) for node_id, data in db_execute("SELECT node_id, data FROM latest", fetch=True)}
+    history = {node_id: json.loads(data) for node_id, data in db_execute("SELECT node_id, data FROM history", fetch=True)}
     return latest, history
 
 def save_node_state(node_id):
-    """ 將單一節點的最新狀態與歷史紀錄寫回 SQLite，供重啟後還原 """
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO latest (node_id, data) VALUES (?, ?) ON CONFLICT(node_id) DO UPDATE SET data = excluded.data",
+    """ 將單一節點的最新狀態與歷史紀錄寫回資料庫，供重啟後還原 """
+    db_execute(
+        "INSERT INTO latest (node_id, data) VALUES (%s, %s) ON CONFLICT (node_id) DO UPDATE SET data = EXCLUDED.data",
         (node_id, json.dumps(latest_data[node_id]))
     )
-    cursor.execute(
-        "INSERT INTO history (node_id, data) VALUES (?, ?) ON CONFLICT(node_id) DO UPDATE SET data = excluded.data",
+    db_execute(
+        "INSERT INTO history (node_id, data) VALUES (%s, %s) ON CONFLICT (node_id) DO UPDATE SET data = EXCLUDED.data",
         (node_id, json.dumps(history_data[node_id]))
     )
-    conn.commit()
-    conn.close()
 
-# 全域狀態儲存（開機時從 SQLite 還原，重啟/休眠喚醒後資料不會歸零）
+_last_prune_time = 0
+
+def log_reading(node_id, sensor_values, recorded_at):
+    """ 把這批數值逐筆寫進完整歷史紀錄表，並每隔 PRUNE_INTERVAL 秒清掉超過保留期限的舊資料 """
+    global _last_prune_time
+    rows = [(node_id, sensor, value, recorded_at) for sensor, value in sensor_values.items()]
+    db_execute(
+        "INSERT INTO readings (node_id, sensor, value, recorded_at) VALUES (%s, %s, %s, %s)",
+        rows, many=True
+    )
+
+    now = time.time()
+    if now - _last_prune_time > PRUNE_INTERVAL:
+        cutoff = now - RETENTION_SECONDS
+        db_execute("DELETE FROM readings WHERE recorded_at < %s", (cutoff,))
+        _last_prune_time = now
+
+# 全域狀態儲存（開機時從資料庫還原，重新部署/休眠/重啟都不會遺失）
 init_db()
 latest_data, history_data = load_state()
 last_seen = {}
@@ -149,6 +211,31 @@ def get_all_data():
         "latest": latest_data,
     })
 
+@app.get("/api/history_range/<node_id>")
+def get_history_range(node_id):
+    """ 查詢某節點過去最多 7 天的完整原始資料（不受即時圖表 100 筆上限影響） """
+    days = request.args.get("days", default=7, type=int)
+    days = max(1, min(days, 7))  # 目前只保留 7 天，超過範圍就夾住
+    cutoff = time.time() - days * 86400
+
+    rows = db_execute(
+        "SELECT sensor, value, recorded_at FROM readings WHERE node_id = %s AND recorded_at >= %s ORDER BY recorded_at ASC",
+        (node_id, cutoff), fetch=True
+    )
+
+    timestamps = sorted(set(r[2] for r in rows))
+    labels = [(datetime.utcfromtimestamp(ts) + timedelta(hours=8)).strftime("%m/%d %H:%M:%S") for ts in timestamps]
+
+    by_sensor = {}
+    for sensor, value, ts in rows:
+        by_sensor.setdefault(sensor, {})[ts] = value
+
+    result = {"labels": labels}
+    for sensor, ts_map in by_sensor.items():
+        result[sensor] = [ts_map.get(ts) for ts in timestamps]
+
+    return jsonify(result)
+
 @app.route('/update', methods=['POST'])
 def update():
     global latest_data, history_data
@@ -170,9 +257,10 @@ def update():
 
     # 優先採用封包自帶的原始時間戳（斷線補傳資料也一樣），確保時間序列不因補傳而錯亂
     try:
-        event_dt = datetime.utcfromtimestamp(float(req["recorded_at"]))
+        event_ts = float(req["recorded_at"])
     except (KeyError, TypeError, ValueError):
-        event_dt = datetime.utcnow()
+        event_ts = time.time()
+    event_dt = datetime.utcfromtimestamp(event_ts)
     current_time = (event_dt + timedelta(hours=8)).strftime("%H:%M:%S")
 
     if node_id not in history_data:
@@ -185,11 +273,13 @@ def update():
     mapping = {"t": "temp", "h": "hum", "c": "co2", "v": "volt"}
 
     node_latest = latest_data.setdefault(node_id, {})
+    parsed_values = {}
 
     # 更新數值並寫入歷史
     for key, val in sensor_batch.items():
         num_val = round(float(val), 2)
         node_latest[key] = str(num_val)
+        parsed_values[key] = num_val
 
         hist_key = mapping.get(key, key)
         if hist_key not in node_hist:
@@ -204,6 +294,7 @@ def update():
         if len(node_hist[k]) > 100: node_hist[k].pop(0)
 
     save_node_state(node_id)
+    log_reading(node_id, parsed_values, event_ts)
 
     # 資料存好後才判斷警報：先看這批數值有沒有超標，再掃描有沒有節點離線
     check_threshold_alerts(node_id, sensor_batch)

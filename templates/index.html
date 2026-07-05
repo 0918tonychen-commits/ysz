@@ -524,12 +524,10 @@ function fetchDataWithSelfHealing() {
     });
 }
 
-// ── Excel 完美匯出 ──
+// ── Excel 完美匯出（過去 7 天完整原始資料，不受即時圖表 100 筆上限影響）──
 function exportExcel() {
   if (!activeNode) return;
-  fetch('/api/all_data').then(res => res.json()).then(responseData => {
-    const historyData = responseData.history || {};
-    const hist = historyData[activeNode];
+  fetch(`/api/history_range/${activeNode}?days=7`).then(res => res.json()).then(hist => {
     if (!hist || !hist.labels) return;
 
     const ks = Object.keys(hist).filter(k => k !== 'labels');
