@@ -525,27 +525,38 @@ function fetchDataWithSelfHealing() {
 }
 
 // ── Excel 完美匯出（過去 7 天完整原始資料，不受即時圖表 100 筆上限影響）──
+// 把 API 回傳的 {labels, 感測器: [...]} 格式轉成 Excel 工作表的二維陣列
+function historyToSheet(hist) {
+  const ks = Object.keys(hist).filter(k => k !== 'labels');
+  let sheetData = [ ["Time", ...ks.map(k => k.toUpperCase())] ];
+  for(let i = 0; i < hist.labels.length; i++) {
+    let row = [hist.labels[i]];
+    ks.forEach(k => {
+      let val = hist[k][i];
+      row.push(val !== undefined && val !== null && val !== "" ? Number(val) : null);
+    });
+    sheetData.push(row);
+  }
+  return XLSX.utils.aoa_to_sheet(sheetData);
+}
+
 function exportExcel() {
   if (!activeNode) return;
-  fetch(`/api/history_range/${activeNode}?days=7`).then(res => res.json()).then(hist => {
-    if (!hist || !hist.labels) return;
+  // 同時抓兩層資料：近 7 天完整原始資料 + 近 90 天每小時統計（平均/最低/最高）
+  Promise.all([
+    fetch(`/api/history_range/${activeNode}?days=7`).then(res => res.json()),
+    fetch(`/api/history_hourly/${activeNode}?days=90`).then(res => res.json()).catch(() => null)
+  ]).then(([raw, hourly]) => {
+    if (!raw || !raw.labels) return;
 
-    const ks = Object.keys(hist).filter(k => k !== 'labels');
-    
-    let sheetData = [ ["Time", ...ks.map(k => k.toUpperCase())] ];
-    
-    for(let i = 0; i < hist.labels.length; i++) {
-      let row = [hist.labels[i]]; 
-      ks.forEach(k => {
-        let val = hist[k][i];
-        row.push(val !== undefined && val !== null && val !== "" ? Number(val) : null);
-      });
-      sheetData.push(row);
-    }
-    
-    const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, `${activeNode}_Data`);
+    XLSX.utils.book_append_sheet(workbook, historyToSheet(raw), `${activeNode}_7d_raw`);
+
+    // 長期資料剛上線時小時表可能還是空的，有資料才加第二張工作表
+    if (hourly && hourly.labels && hourly.labels.length > 0) {
+      XLSX.utils.book_append_sheet(workbook, historyToSheet(hourly), `${activeNode}_90d_hourly`);
+    }
+
     XLSX.writeFile(workbook, `${activeNode}_DATA.xlsx`);
   });
 }

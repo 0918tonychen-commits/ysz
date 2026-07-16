@@ -38,8 +38,9 @@ OFFLINE_TIMEOUT = 180     # 節點超過幾秒沒回報就判定離線（3 分�
 ALERT_COOLDOWN = 600      # 同一個警報幾秒內不重複發送（10 分鐘，避免洗版）
 
 # ── 完整歷史紀錄保留設定 ──
-RETENTION_SECONDS = 7 * 24 * 60 * 60  # 保留最近 7 天的完整原始資料
-PRUNE_INTERVAL = 300                  # 每 5 分鐘才真的執行一次清除，避免每個請求都跑 DELETE
+RETENTION_SECONDS = 7 * 24 * 60 * 60         # 保留最近 7 天的完整原始資料
+PRUNE_INTERVAL = 300                         # 每 5 分鐘才真的執行一次清除，避免每個請求都跑 DELETE
+HOURLY_RETENTION_SECONDS = 365 * 24 * 60 * 60  # 降採樣後的每小時統計保留 365 天
 
 # ── 共用資料庫執行器 ──
 # 維持一條長連線重複使用（每次重開連線到 Neon 要多花數百毫秒）；
@@ -96,6 +97,20 @@ def init_db():
         )
     ''')
     db_execute('CREATE INDEX IF NOT EXISTS idx_readings_node_time ON readings (node_id, recorded_at)')
+    # 降採樣長期保存：原始資料滿 7 天被清除前，先壓縮成「每小時一筆統計」存進這張表。
+    # 存 sum 而非 avg，才能在同一小時分多批壓縮時正確合併（讀取時再算平均）。
+    db_execute('''
+        CREATE TABLE IF NOT EXISTS readings_hourly (
+            node_id TEXT NOT NULL,
+            sensor TEXT NOT NULL,
+            bucket_ts DOUBLE PRECISION NOT NULL,
+            sum_value DOUBLE PRECISION NOT NULL,
+            min_value DOUBLE PRECISION NOT NULL,
+            max_value DOUBLE PRECISION NOT NULL,
+            sample_count BIGINT NOT NULL,
+            PRIMARY KEY (node_id, sensor, bucket_ts)
+        )
+    ''')
 
 def load_state():
     latest = {node_id: json.loads(data) for node_id, data in db_execute("SELECT node_id, data FROM latest", fetch=True)}
@@ -127,7 +142,27 @@ def log_reading(node_id, sensor_values, recorded_at):
     now = time.time()
     if now - _last_prune_time > PRUNE_INTERVAL:
         cutoff = now - RETENTION_SECONDS
-        db_execute("DELETE FROM readings WHERE recorded_at < %s", (cutoff,))
+        # 降採樣：把即將過期的原始資料壓縮成每小時統計後才刪除。
+        # 整段是單一 SQL 語句（CTE），資料庫保證原子性：
+        # 不會出現「壓縮成功但刪除失敗 → 下輪重複壓縮 → 統計翻倍」的錯誤。
+        db_execute('''
+            WITH expired AS (
+                DELETE FROM readings WHERE recorded_at < %s
+                RETURNING node_id, sensor, value, recorded_at
+            )
+            INSERT INTO readings_hourly (node_id, sensor, bucket_ts, sum_value, min_value, max_value, sample_count)
+            SELECT node_id, sensor, FLOOR(recorded_at / 3600) * 3600,
+                   SUM(value), MIN(value), MAX(value), COUNT(*)
+            FROM expired
+            GROUP BY node_id, sensor, FLOOR(recorded_at / 3600) * 3600
+            ON CONFLICT (node_id, sensor, bucket_ts) DO UPDATE SET
+                sum_value = readings_hourly.sum_value + EXCLUDED.sum_value,
+                min_value = LEAST(readings_hourly.min_value, EXCLUDED.min_value),
+                max_value = GREATEST(readings_hourly.max_value, EXCLUDED.max_value),
+                sample_count = readings_hourly.sample_count + EXCLUDED.sample_count
+        ''', (cutoff,))
+        # 小時統計也有保留上限（365 天），超過的才真正丟棄
+        db_execute("DELETE FROM readings_hourly WHERE bucket_ts < %s", (now - HOURLY_RETENTION_SECONDS,))
         _last_prune_time = now
 
 # 全域狀態儲存（開機時從資料庫還原，重新部署/休眠/重啟都不會遺失）
@@ -233,6 +268,35 @@ def get_history_range(node_id):
     result = {"labels": labels}
     for sensor, ts_map in by_sensor.items():
         result[sensor] = [ts_map.get(ts) for ts in timestamps]
+
+    return jsonify(result)
+
+@app.get("/api/history_hourly/<node_id>")
+def get_history_hourly(node_id):
+    """ 查詢降採樣後的長期資料（每小時統計，最多回溯 365 天）。
+        每個感測器回傳三組陣列：平均值（感測器名）、最低（_min）、最高（_max）。 """
+    days = request.args.get("days", default=30, type=int)
+    days = max(1, min(days, 365))
+    cutoff = time.time() - days * 86400
+
+    rows = db_execute(
+        """SELECT sensor, bucket_ts, sum_value / sample_count, min_value, max_value
+           FROM readings_hourly WHERE node_id = %s AND bucket_ts >= %s ORDER BY bucket_ts ASC""",
+        (node_id, cutoff), fetch=True
+    )
+
+    timestamps = sorted(set(r[1] for r in rows))
+    labels = [(datetime.utcfromtimestamp(ts) + timedelta(hours=8)).strftime("%m/%d %H:00") for ts in timestamps]
+
+    by_sensor = {}
+    for sensor, ts, avg_v, min_v, max_v in rows:
+        by_sensor.setdefault(sensor, {})[ts] = (round(avg_v, 2), min_v, max_v)
+
+    result = {"labels": labels}
+    for sensor, ts_map in by_sensor.items():
+        result[sensor] = [ts_map[ts][0] if ts in ts_map else None for ts in timestamps]
+        result[f"{sensor}_min"] = [ts_map[ts][1] if ts in ts_map else None for ts in timestamps]
+        result[f"{sensor}_max"] = [ts_map[ts][2] if ts in ts_map else None for ts in timestamps]
 
     return jsonify(result)
 
