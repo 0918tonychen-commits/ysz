@@ -1,6 +1,13 @@
 venv/
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
 *.db
+*.db-shm
+*.db-wal
 .env
+.env.*
+!.env.example
+.claude/
+.pytest_cache/
 

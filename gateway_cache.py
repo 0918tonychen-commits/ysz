@@ -1,129 +1,234 @@
-import time
+"""Thread-safe SQLite store-and-forward telemetry delivery."""
+
+from __future__ import annotations
+
 import json
 import sqlite3
+import threading
+import time
+import uuid
+from typing import Any
+
 import requests
 
-LOCAL_DB = "gateway_cache.db"
-MAX_CACHE_ROWS = 5000   # 快取上限保護，防止空間撐爆
-FLUSH_BATCH_LIMIT = 10  # 每次補傳最多處理筆數，避免大量補傳時卡住序列埠讀取
-MAX_ROW_RETRIES = 5     # 單筆資料連續遭後端拒絕的上限，超過視為異常封包並捨棄
+_backend_url = ""
+_api_key = ""
+_local_db = "gateway_cache.db"
+_max_rows = 5000
+_flush_batch = 10
+_flush_lock = threading.Lock()
+
+TEMPORARY_STATUSES = {408, 425, 429}
+PERMANENT_STATUSES = {400, 401, 403, 404, 415, 422}
 
 
-def init_local_cache():
-    """ 初始化本地快取資料庫 """
-    conn = sqlite3.connect(LOCAL_DB, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS cache (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            node_id TEXT,
-            payload TEXT,
-            timestamp REAL,
-            retries INTEGER DEFAULT 0
+class TelemetryDeliveryError(RuntimeError):
+    pass
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(_local_db, timeout=10)
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def configure(
+    backend_url: str, local_db: str = "gateway_cache.db", api_key: str = ""
+) -> None:
+    global _backend_url, _local_db, _api_key
+    _backend_url = backend_url.rstrip("/")
+    _local_db = local_db
+    _api_key = api_key
+    init_local_cache()
+
+
+def init_local_cache() -> None:
+    with _connect() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                node_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                recorded_at REAL NOT NULL,
+                retries INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            )"""
         )
-    ''')
-    # 相容舊版資料庫：若是舊檔案沒有 retries 欄位，補上去
-    cursor.execute("PRAGMA table_info(cache)")
-    existing_cols = [c[1] for c in cursor.fetchall()]
-    if "retries" not in existing_cols:
-        cursor.execute("ALTER TABLE cache ADD COLUMN retries INTEGER DEFAULT 0")
-    conn.commit()
-    conn.close()
-
-
-def save_to_local_cache(node_id, data_payload):
-    """ 當雲端斷網時，自主防禦轉存至本地 SQLite 確保數據不遺失 """
-    print("📦 [網關容錯] 遠端連線異常，封包自主存入本地 SQLite 快取。")
-    try:
-        conn = sqlite3.connect(LOCAL_DB, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO cache (node_id, payload, timestamp) VALUES (?, ?, ?)",
-            (node_id, json.dumps(data_payload), time.time())
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(cache)").fetchall()
+        }
+        if "event_id" not in columns:
+            conn.execute("ALTER TABLE cache ADD COLUMN event_id TEXT")
+        if "recorded_at" not in columns:
+            conn.execute("ALTER TABLE cache ADD COLUMN recorded_at REAL")
+        if "last_error" not in columns:
+            conn.execute("ALTER TABLE cache ADD COLUMN last_error TEXT")
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(cache)").fetchall()
+        }
+        timestamp_source = "timestamp" if "timestamp" in columns else "NULL"
+        conn.execute(
+            "UPDATE cache SET event_id=COALESCE(event_id,'legacy-'||id), "
+            f"recorded_at=COALESCE(recorded_at,{timestamp_source},strftime('%s','now'))"
         )
-        conn.commit()
-
-        # 快取筆數上限保護
-        cursor.execute("SELECT COUNT(*) FROM cache")
-        total = cursor.fetchone()[0]
-        if total > MAX_CACHE_ROWS:
-            overflow = total - MAX_CACHE_ROWS
-            cursor.execute(
-                "DELETE FROM cache WHERE id IN (SELECT id FROM cache ORDER BY id ASC LIMIT ?)",
-                (overflow,)
-            )
-            conn.commit()
-            print(f"⚠️ [網關容錯] 快取超過上限，已捨棄最舊 {overflow} 筆資料。")
-    except sqlite3.Error as e:
-        print(f"❌ [快取失敗] 資料庫錯誤: {e}")
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-
-def flush_local_cache(backend_url):
-    """ 當網路恢復時，以節流方式分批續傳歷史數據，避免長時間阻塞序列埠讀取 """
-    try:
-        conn = sqlite3.connect(LOCAL_DB, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, node_id, payload, timestamp, retries FROM cache ORDER BY id ASC LIMIT ?",
-            (FLUSH_BATCH_LIMIT,)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_event_id ON cache(event_id)"
         )
-        cached_rows = cursor.fetchall()
-
-        if cached_rows:
-            cursor.execute("SELECT COUNT(*) FROM cache")
-            remaining = cursor.fetchone()[0]
-            print(f"🔄 [網關自癒] 連線已恢復！本輪補傳 {len(cached_rows)} 筆（佇列總計剩餘 {remaining} 筆）...")
-            for row in cached_rows:
-                db_id, node_id, payload_str, recorded_at, retries = row
-                post_payload = {
-                    "node": node_id,
-                    "data": json.loads(payload_str),
-                    "recorded_at": recorded_at,  # 沿用原始發生時間，避免補傳時序錯亂
-                }
-                try:
-                    res = requests.post(backend_url, json=post_payload, timeout=1.0)
-                    if res.status_code in (200, 201):
-                        cursor.execute("DELETE FROM cache WHERE id = ?", (db_id,))
-                        conn.commit()  # 即時提交，防止中斷時整批回滾
-                    else:
-                        retries += 1
-                        if retries >= MAX_ROW_RETRIES:
-                            print(f"❌ [網關自癒] 第 {db_id} 筆資料連續 {retries} 次遭後端拒絕（狀態碼 {res.status_code}），判定為異常封包並捨棄，不再阻擋後續補傳。")
-                            cursor.execute("DELETE FROM cache WHERE id = ?", (db_id,))
-                        else:
-                            print(f"⚠️ [網關自癒] 第 {db_id} 筆資料遭後端拒絕（狀態碼 {res.status_code}），重試次數 {retries}/{MAX_ROW_RETRIES}，跳過並繼續處理下一筆。")
-                            cursor.execute("UPDATE cache SET retries = ? WHERE id = ?", (retries, db_id))
-                        conn.commit()
-                        # 非網路問題（伺服器有回應但拒絕），不中斷本輪補傳，繼續嘗試佇列中其他資料
-                except requests.RequestException:
-                    print("⚠️ [網關自癒] 續傳中斷，雲端連線再度不穩，暫停本次自癒補傳。")
-                    break
-    except sqlite3.Error as e:
-        print(f"❌ [補傳失敗] 資料庫讀取異常: {e}")
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
-def upload_telemetry(backend_url, node_id, data_payload):
-    """ 主體上傳邏輯：先節流補傳舊快取，再送出當前資料；任何失敗都自動轉存本地 """
-    flush_local_cache(backend_url)
+def cache_count() -> int:
+    init_local_cache()
+    with _connect() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0])
 
-    post_payload = {
+
+def _envelope(
+    node_id: str,
+    payload: dict[str, Any],
+    recorded_at: float | None,
+    event_id: str | None,
+) -> dict[str, Any]:
+    if "data" in payload:
+        data = payload.get("data", {})
+        meta = payload.get("meta", {})
+    else:  # compatibility with the old gateway call
+        data, meta = payload, {}
+    return {
+        "event_id": event_id or str(uuid.uuid4()),
         "node": node_id,
-        "data": data_payload,
-        "recorded_at": time.time(),
+        "recorded_at": recorded_at if recorded_at is not None else time.time(),
+        "data": data,
+        "meta": meta,
     }
+
+
+def save_to_local_cache(
+    node_id: str,
+    payload: dict[str, Any],
+    *,
+    recorded_at: float | None = None,
+    event_id: str | None = None,
+    last_error: str | None = None,
+) -> bool:
+    envelope = _envelope(node_id, payload, recorded_at, event_id)
     try:
-        res = requests.post(backend_url, json=post_payload, timeout=3.0)
-        if res.status_code in (200, 201):
-            print(f"🚀 [傳送成功] {node_id}: {data_payload}")
-        else:
-            print(f"⚠️ [伺服器異常] 狀態碼: {res.status_code}，切換為本地儲存模式。")
-            save_to_local_cache(node_id, data_payload)
-    except requests.RequestException as req_err:
-        print(f"🌐 [傳輸超時/失敗] 伺服器無響應，資料已進行本地防禦暫存: {req_err}")
-        save_to_local_cache(node_id, data_payload)
+        encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        print(f"CRITICAL: telemetry JSON serialization failed: {exc}")
+        return False
+    try:
+        init_local_cache()
+        with _connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO cache
+                   (event_id,node_id,payload,recorded_at,last_error)
+                   VALUES (?,?,?,?,?)""",
+                (
+                    envelope["event_id"],
+                    node_id,
+                    encoded,
+                    envelope["recorded_at"],
+                    last_error,
+                ),
+            )
+            total = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+            if total > _max_rows:
+                lost = total - _max_rows
+                conn.execute(
+                    "DELETE FROM cache WHERE id IN "
+                    "(SELECT id FROM cache ORDER BY recorded_at,id LIMIT ?)",
+                    (lost,),
+                )
+                print(f"CRITICAL: cache limit exceeded; permanently dropped {lost} oldest events")
+        return True
+    except sqlite3.Error as exc:
+        print(f"CRITICAL: SQLite cache write failed: {exc}")
+        return False
+
+
+def _post(envelope: dict[str, Any], timeout: float) -> requests.Response:
+    if not _backend_url:
+        raise TelemetryDeliveryError("gateway cache backend URL is not configured")
+    headers = {"X-API-Key": _api_key} if _api_key else {}
+    return requests.post(_backend_url, json=envelope, headers=headers, timeout=timeout)
+
+
+def flush_local_cache() -> int:
+    if not _flush_lock.acquire(blocking=False):
+        return 0
+    sent = 0
+    try:
+        init_local_cache()
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT id,payload,retries FROM cache ORDER BY recorded_at,id LIMIT ?",
+                (_flush_batch,),
+            ).fetchall()
+        for row_id, encoded, retries in rows:
+            try:
+                envelope = json.loads(encoded)
+            except (TypeError, json.JSONDecodeError) as exc:
+                print(f"CRITICAL: dropping corrupt cached JSON row {row_id}: {exc}")
+                with _connect() as conn:
+                    conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
+                continue
+            try:
+                response = _post(envelope, 2.0)
+                status = response.status_code
+            except requests.RequestException as exc:
+                with _connect() as conn:
+                    conn.execute(
+                        "UPDATE cache SET retries=retries+1,last_error=? WHERE id=?",
+                        (str(exc)[:500], row_id),
+                    )
+                break
+            if 200 <= status < 300:
+                with _connect() as conn:
+                    conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
+                sent += 1
+            elif status in PERMANENT_STATUSES:
+                print(f"ERROR: permanently rejected cached event row {row_id}: HTTP {status}")
+                with _connect() as conn:
+                    conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
+            else:
+                with _connect() as conn:
+                    conn.execute(
+                        "UPDATE cache SET retries=?,last_error=? WHERE id=?",
+                        (retries + 1, f"HTTP {status}", row_id),
+                    )
+                if status in TEMPORARY_STATUSES or status >= 500:
+                    break
+        return sent
+    finally:
+        _flush_lock.release()
+
+
+def upload_telemetry(
+    node_id: str,
+    payload: dict[str, Any],
+    *,
+    recorded_at: float | None = None,
+    event_id: str | None = None,
+) -> bool:
+    envelope = _envelope(node_id, payload, recorded_at, event_id)
+    flush_local_cache()
+    try:
+        response = _post(envelope, 3.0)
+        if 200 <= response.status_code < 300:
+            return True
+        error = f"HTTP {response.status_code}"
+    except requests.RequestException as exc:
+        error = str(exc)
+    if not save_to_local_cache(
+        node_id,
+        payload,
+        recorded_at=envelope["recorded_at"],
+        event_id=envelope["event_id"],
+        last_error=error,
+    ):
+        raise TelemetryDeliveryError(
+            f"upload failed ({error}) and telemetry could not be cached"
+        )
+    return False

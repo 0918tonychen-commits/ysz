@@ -1,382 +1,498 @@
-from flask import Flask, render_template, request, jsonify
-from datetime import datetime, timedelta
-import time
+"""Flask backend for LoRa environmental telemetry."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+import hmac
 import json
+import math
 import os
+import re
 import threading
-import requests
-import psycopg
+import time
+from typing import Any
+
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template, request
+import psycopg
+from psycopg.types.json import Jsonb
+import requests
+
+load_dotenv()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
 
-# ── 資料庫連線設定（Neon PostgreSQL）──
-# 本機開發：從專案根目錄 .env 讀取；Render 部署：從後台 Environment 讀取。
-# 換成外部資料庫後，重新部署／休眠／重啟都不會再遺失資料。
-load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
-if not DATABASE_URL:
-    raise RuntimeError(
-        "未設定 DATABASE_URL！本機請在專案根目錄的 .env 填入 Neon 連線字串，"
-        "Render 請在服務的 Environment 頁面設定。"
-    )
-
-# ── Discord 警報通知設定 ──
-# Webhook 網址視為機密，優先從環境變數讀取（Render 後台設定）。
-# 沒設定時 alerts 只會印在 log、不會送出，不影響其他功能運作。
+API_KEY = os.environ.get("LORA_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+OFFLINE_TIMEOUT = int(os.environ.get("OFFLINE_TIMEOUT_SECONDS", "180"))
+ALERT_COOLDOWN = 600
+RETENTION_SECONDS = 7 * 86400
+HOURLY_RETENTION_SECONDS = 365 * 86400
 
-# ── 警報規則 ──
-# 每個感測器代號對應「上限值、顯示名稱、單位」。數值超過 max 就發警報。
+NODE_RE = re.compile(r"^s\d{2,}$")
+SENSOR_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+EVENT_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+META_NUMERIC = {"mcount", "rssi", "snr", "hop_rssi", "hop_snr", "loss", "level"}
+META_ALLOWED = META_NUMERIC | {"via", "boot_id"}
 ALERT_RULES = {
-    "c":    {"max": 1000, "label": "CO₂",   "unit": "ppm"},
-    "pm25": {"max": 35,   "label": "PM2.5", "unit": "µg/m³"},
-    "pm10": {"max": 150,  "label": "PM10",  "unit": "µg/m³"},
-    "t":    {"max": 40,   "label": "溫度",  "unit": "°C"},
+    "co2": {"max": 1000, "label": "CO₂", "unit": "ppm"},
+    "pm25": {"max": 35, "label": "PM2.5", "unit": "µg/m³"},
+    "pm10": {"max": 150, "label": "PM10", "unit": "µg/m³"},
+    "temperature": {"max": 40, "label": "溫度", "unit": "°C"},
 }
-OFFLINE_TIMEOUT = 180     # 節點超過幾秒沒回報就判定離線（3 分鐘）
-ALERT_COOLDOWN = 600      # 同一個警報幾秒內不重複發送（10 分鐘，避免洗版）
 
-# ── 完整歷史紀錄保留設定 ──
-RETENTION_SECONDS = 7 * 24 * 60 * 60         # 保留最近 7 天的完整原始資料
-PRUNE_INTERVAL = 300                         # 每 5 分鐘才真的執行一次清除，避免每個請求都跑 DELETE
-HOURLY_RETENTION_SECONDS = 365 * 24 * 60 * 60  # 降採樣後的每小時統計保留 365 天
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is required")
+if not API_KEY:
+    print("WARNING: LORA_API_KEY is unset; protected endpoints reject all requests")
 
-# ── 共用資料庫執行器 ──
-# 維持一條長連線重複使用（每次重開連線到 Neon 要多花數百毫秒）；
-# Neon 免費方案閒置一段時間會休眠、喚醒時舊連線會失效，所以失敗時自動重連再試一次。
-_db_lock = threading.Lock()
-_db_conn = None
+_db_lock = threading.RLock()
+_db_conn: psycopg.Connection[Any] | None = None
+_alert_lock = threading.Lock()
+_alert_cooldowns: dict[str, float] = {}
+_monitor_started = False
 
-def db_execute(query, params=None, fetch=False, many=False):
+
+def _connection() -> psycopg.Connection[Any]:
     global _db_conn
+    if _db_conn is None or _db_conn.closed:
+        _db_conn = psycopg.connect(DATABASE_URL)
+    return _db_conn
+
+
+@contextmanager
+def db_transaction():
     with _db_lock:
-        for attempt in (1, 2):
-            try:
-                if _db_conn is None or _db_conn.closed:
-                    _db_conn = psycopg.connect(DATABASE_URL, autocommit=True)
-                with _db_conn.cursor() as cursor:
-                    if many:
-                        cursor.executemany(query, params or [])
-                        return None
-                    cursor.execute(query, params or ())
-                    return cursor.fetchall() if fetch else None
-            except psycopg.OperationalError:
-                # 連線失效（Neon 休眠喚醒或網路中斷）：丟掉舊連線，重連再試一次
-                try:
-                    if _db_conn:
-                        _db_conn.close()
-                except psycopg.Error:
-                    pass
+        conn = _connection()
+        with conn.transaction():
+            yield conn
+
+
+def db_fetch(query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    global _db_conn
+    for attempt in range(2):
+        try:
+            with db_transaction() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, params)
+                    return cursor.fetchall()
+        except psycopg.OperationalError:
+            with _db_lock:
+                if _db_conn and not _db_conn.closed:
+                    _db_conn.close()
                 _db_conn = None
-                if attempt == 2:
-                    raise
+            if attempt:
+                raise
+    return []
 
-def init_db():
-    db_execute('''
-        CREATE TABLE IF NOT EXISTS latest (
-            node_id TEXT PRIMARY KEY,
-            data TEXT
-        )
-    ''')
-    db_execute('''
-        CREATE TABLE IF NOT EXISTS history (
-            node_id TEXT PRIMARY KEY,
-            data TEXT
-        )
-    ''')
-    # 完整歷史紀錄：每一筆數值都存成獨立一列，不受即時圖表 100 筆上限影響，
-    # 只靠 recorded_at 保留最近 RETENTION_SECONDS（目前 7 天），舊資料自動清除
-    db_execute('''
-        CREATE TABLE IF NOT EXISTS readings (
-            id BIGSERIAL PRIMARY KEY,
-            node_id TEXT NOT NULL,
-            sensor TEXT NOT NULL,
-            value DOUBLE PRECISION NOT NULL,
-            recorded_at DOUBLE PRECISION NOT NULL
-        )
-    ''')
-    db_execute('CREATE INDEX IF NOT EXISTS idx_readings_node_time ON readings (node_id, recorded_at)')
-    # 降採樣長期保存：原始資料滿 7 天被清除前，先壓縮成「每小時一筆統計」存進這張表。
-    # 存 sum 而非 avg，才能在同一小時分多批壓縮時正確合併（讀取時再算平均）。
-    db_execute('''
-        CREATE TABLE IF NOT EXISTS readings_hourly (
-            node_id TEXT NOT NULL,
-            sensor TEXT NOT NULL,
-            bucket_ts DOUBLE PRECISION NOT NULL,
-            sum_value DOUBLE PRECISION NOT NULL,
-            min_value DOUBLE PRECISION NOT NULL,
-            max_value DOUBLE PRECISION NOT NULL,
-            sample_count BIGINT NOT NULL,
-            PRIMARY KEY (node_id, sensor, bucket_ts)
-        )
-    ''')
 
-def load_state():
-    latest = {node_id: json.loads(data) for node_id, data in db_execute("SELECT node_id, data FROM latest", fetch=True)}
-    history = {node_id: json.loads(data) for node_id, data in db_execute("SELECT node_id, data FROM history", fetch=True)}
-    return latest, history
-
-def save_node_state(node_id):
-    """ 將單一節點的最新狀態與歷史紀錄寫回資料庫，供重啟後還原 """
-    db_execute(
-        "INSERT INTO latest (node_id, data) VALUES (%s, %s) ON CONFLICT (node_id) DO UPDATE SET data = EXCLUDED.data",
-        (node_id, json.dumps(latest_data[node_id]))
-    )
-    db_execute(
-        "INSERT INTO history (node_id, data) VALUES (%s, %s) ON CONFLICT (node_id) DO UPDATE SET data = EXCLUDED.data",
-        (node_id, json.dumps(history_data[node_id]))
-    )
-
-_last_prune_time = 0
-
-def log_reading(node_id, sensor_values, recorded_at):
-    """ 把這批數值逐筆寫進完整歷史紀錄表，並每隔 PRUNE_INTERVAL 秒清掉超過保留期限的舊資料 """
-    global _last_prune_time
-    rows = [(node_id, sensor, value, recorded_at) for sensor, value in sensor_values.items()]
-    db_execute(
-        "INSERT INTO readings (node_id, sensor, value, recorded_at) VALUES (%s, %s, %s, %s)",
-        rows, many=True
-    )
-
-    now = time.time()
-    if now - _last_prune_time > PRUNE_INTERVAL:
-        cutoff = now - RETENTION_SECONDS
-        # 降採樣：把即將過期的原始資料壓縮成每小時統計後才刪除。
-        # 整段是單一 SQL 語句（CTE），資料庫保證原子性：
-        # 不會出現「壓縮成功但刪除失敗 → 下輪重複壓縮 → 統計翻倍」的錯誤。
-        db_execute('''
-            WITH expired AS (
-                DELETE FROM readings WHERE recorded_at < %s
-                RETURNING node_id, sensor, value, recorded_at
+def init_db() -> None:
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """CREATE TABLE IF NOT EXISTS telemetry_events (
+                    event_id TEXT PRIMARY KEY,
+                    node_id TEXT NOT NULL,
+                    recorded_at DOUBLE PRECISION NOT NULL,
+                    received_at DOUBLE PRECISION NOT NULL,
+                    data JSONB NOT NULL,
+                    meta JSONB NOT NULL
+                )"""
             )
-            INSERT INTO readings_hourly (node_id, sensor, bucket_ts, sum_value, min_value, max_value, sample_count)
-            SELECT node_id, sensor, FLOOR(recorded_at / 3600) * 3600,
-                   SUM(value), MIN(value), MAX(value), COUNT(*)
-            FROM expired
-            GROUP BY node_id, sensor, FLOOR(recorded_at / 3600) * 3600
-            ON CONFLICT (node_id, sensor, bucket_ts) DO UPDATE SET
-                sum_value = readings_hourly.sum_value + EXCLUDED.sum_value,
-                min_value = LEAST(readings_hourly.min_value, EXCLUDED.min_value),
-                max_value = GREATEST(readings_hourly.max_value, EXCLUDED.max_value),
-                sample_count = readings_hourly.sample_count + EXCLUDED.sample_count
-        ''', (cutoff,))
-        # 小時統計也有保留上限（365 天），超過的才真正丟棄
-        db_execute("DELETE FROM readings_hourly WHERE bucket_ts < %s", (now - HOURLY_RETENTION_SECONDS,))
-        _last_prune_time = now
+            cursor.execute(
+                """CREATE TABLE IF NOT EXISTS readings (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_id TEXT,
+                    node_id TEXT NOT NULL,
+                    sensor TEXT NOT NULL,
+                    value DOUBLE PRECISION NOT NULL,
+                    recorded_at DOUBLE PRECISION NOT NULL
+                )"""
+            )
+            cursor.execute("ALTER TABLE readings ADD COLUMN IF NOT EXISTS event_id TEXT")
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_event_sensor "
+                "ON readings(event_id,sensor) WHERE event_id IS NOT NULL"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_node_time "
+                "ON telemetry_events(node_id,recorded_at)"
+            )
+            cursor.execute(
+                """CREATE TABLE IF NOT EXISTS readings_hourly (
+                    node_id TEXT NOT NULL,
+                    sensor TEXT NOT NULL,
+                    bucket_ts DOUBLE PRECISION NOT NULL,
+                    sum_value DOUBLE PRECISION NOT NULL,
+                    min_value DOUBLE PRECISION NOT NULL,
+                    max_value DOUBLE PRECISION NOT NULL,
+                    sample_count BIGINT NOT NULL,
+                    PRIMARY KEY(node_id,sensor,bucket_ts)
+                )"""
+            )
+            cursor.execute(
+                """CREATE TABLE IF NOT EXISTS alert_state (
+                    alert_key TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    last_sent DOUBLE PRECISION NOT NULL
+                )"""
+            )
 
-# 全域狀態儲存（開機時從資料庫還原，重新部署/休眠/重啟都不會遺失）
-init_db()
-latest_data, history_data = load_state()
-last_seen = {}
 
-# ── 警報去重狀態（存記憶體，伺服器重啟後歸零可接受）──
-alert_cooldowns = {}   # "node:sensor" -> 上次發送時間戳，用來做冷卻，避免同一警報洗版
-offline_nodes = set()  # 目前已判定離線、且已發過警報的節點，避免重複發離線警報
+def _authorized() -> bool:
+    supplied = request.headers.get("X-API-Key", "")
+    if not supplied:
+        auth = request.headers.get("Authorization", "")
+        supplied = auth[7:] if auth.startswith("Bearer ") else ""
+    return bool(API_KEY and supplied and hmac.compare_digest(API_KEY, supplied))
 
-def send_discord_alert(title, message, color=0xFF0000):
-    """ 把警報以 Discord embed 格式送出。放在背景執行緒送，避免拖慢 /update 回應。 """
+
+def _validate_payload(body: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(body, dict):
+        return None, "JSON body must be an object"
+    event_id, node = body.get("event_id"), body.get("node")
+    if not isinstance(event_id, str) or not EVENT_RE.fullmatch(event_id):
+        return None, "invalid event_id"
+    if not isinstance(node, str) or not NODE_RE.fullmatch(node):
+        return None, "invalid node"
+    data, meta = body.get("data"), body.get("meta", {})
+    if not isinstance(data, dict) or not data or len(data) > 64:
+        return None, "data must be a non-empty object with at most 64 sensors"
+    if not isinstance(meta, dict) or set(meta) - META_ALLOWED:
+        return None, "meta contains unsupported fields"
+    clean_data: dict[str, float] = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not SENSOR_RE.fullmatch(key):
+            return None, f"invalid sensor key: {key!r}"
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None, f"sensor {key} must be numeric"
+        number = float(value)
+        if not math.isfinite(number):
+            return None, f"sensor {key} must be finite"
+        clean_data[key] = round(number, 4)
+    clean_meta: dict[str, Any] = {}
+    for key, value in meta.items():
+        if key == "via":
+            if (
+                not isinstance(value, list)
+                or len(value) > 16
+                or any(not isinstance(v, str) or not NODE_RE.fullmatch(v) for v in value)
+            ):
+                return None, "meta.via must be a list of valid node IDs"
+            clean_meta[key] = list(dict.fromkeys(value))
+        elif key == "boot_id":
+            if not isinstance(value, str) or len(value) > 64:
+                return None, "invalid boot_id"
+            clean_meta[key] = value
+        else:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None, f"meta.{key} must be numeric"
+            number = float(value)
+            if not math.isfinite(number):
+                return None, f"meta.{key} must be finite"
+            clean_meta[key] = number
+    try:
+        recorded_at = float(body["recorded_at"])
+    except (KeyError, TypeError, ValueError):
+        return None, "invalid recorded_at"
+    now = time.time()
+    if not math.isfinite(recorded_at) or recorded_at < now - 366 * 86400 or recorded_at > now + 300:
+        return None, "recorded_at outside allowed range"
+    return {
+        "event_id": event_id,
+        "node": node,
+        "recorded_at": recorded_at,
+        "data": clean_data,
+        "meta": clean_meta,
+    }, None
+
+
+def send_discord_alert(title: str, message: str, color: int = 0xFF003C) -> None:
     if not DISCORD_WEBHOOK_URL:
-        print(f"🔔 [警報-未設定Discord] {title}｜{message}")
+        print(f"ALERT: {title}: {message}")
         return
 
-    def _send():
-        payload = {
-            "embeds": [{
-                "title": title,
-                "description": message,
-                "color": color,
-                "footer": {"text": "LORA 環境監測系統"},
-                "timestamp": datetime.utcnow().isoformat()
-            }]
-        }
+    def send() -> None:
         try:
-            requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
-        except requests.RequestException as e:
-            print(f"⚠️ [警報發送失敗] {e}")
+            requests.post(
+                DISCORD_WEBHOOK_URL,
+                json={"embeds": [{"title": title, "description": message, "color": color}]},
+                timeout=5,
+            )
+        except requests.RequestException as exc:
+            print(f"WARNING: Discord alert failed: {exc}")
 
-    threading.Thread(target=_send, daemon=True).start()
+    threading.Thread(target=send, daemon=True).start()
 
-def check_threshold_alerts(node_id, sensor_batch):
-    """ 檢查這批數值有沒有超標，超過門檻且不在冷卻期就發警報 """
+
+def check_threshold_alerts(node: str, data: dict[str, float]) -> None:
     now = time.time()
     for sensor, rule in ALERT_RULES.items():
-        if sensor not in sensor_batch:
+        if sensor not in data or data[sensor] <= rule["max"]:
             continue
-        try:
-            value = float(sensor_batch[sensor])
-        except (ValueError, TypeError):
-            continue
-        if value > rule["max"]:
-            key = f"{node_id}:{sensor}"
-            if now - alert_cooldowns.get(key, 0) < ALERT_COOLDOWN:
-                continue  # 還在冷卻期，先不重複發
-            alert_cooldowns[key] = now
+        key = f"threshold:{node}:{sensor}"
+        with db_transaction() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO alert_state(alert_key,state,last_sent)
+                       VALUES (%s,'active',%s)
+                       ON CONFLICT(alert_key) DO UPDATE SET last_sent=EXCLUDED.last_sent
+                       WHERE alert_state.last_sent < %s
+                       RETURNING alert_key""",
+                    (key, now, now - ALERT_COOLDOWN),
+                )
+                claimed = cursor.fetchone() is not None
+        if claimed:
             send_discord_alert(
-                title=f"⚠️ 數值超標警報｜{node_id.upper()}",
-                message=f"**{rule['label']}** 目前 **{value} {rule['unit']}**，已超過安全上限 {rule['max']} {rule['unit']}。",
-                color=0xFF003C
+                f"數值超標｜{node.upper()}",
+                f"{rule['label']} {data[sensor]} {rule['unit']}，上限 {rule['max']}",
             )
 
-def check_offline_alerts():
-    """ 掃描所有節點，找出太久沒回報的判定離線並發警報；恢復回報的發復線通知 """
+
+def _latest_rows() -> list[tuple[Any, ...]]:
+    return db_fetch(
+        """SELECT DISTINCT ON (node_id) node_id,data,meta,recorded_at,received_at
+           FROM telemetry_events ORDER BY node_id,recorded_at DESC,received_at DESC"""
+    )
+
+
+def check_offline_alerts() -> None:
     now = time.time()
-    for node_id, ts in list(last_seen.items()):
-        silent = now - ts
-        if silent > OFFLINE_TIMEOUT and node_id not in offline_nodes:
-            offline_nodes.add(node_id)
+    for node, _data, _meta, _recorded, received in _latest_rows():
+        if now - received <= OFFLINE_TIMEOUT:
+            continue
+        with db_transaction() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO alert_state(alert_key,state,last_sent)
+                       VALUES (%s,'offline',%s)
+                       ON CONFLICT(alert_key) DO UPDATE
+                       SET state='offline',last_sent=EXCLUDED.last_sent
+                       WHERE alert_state.state <> 'offline'
+                       RETURNING alert_key""",
+                    (f"offline:{node}", now),
+                )
+                claimed = cursor.fetchone() is not None
+        if claimed:
             send_discord_alert(
-                title=f"🔌 節點離線警報｜{node_id.upper()}",
-                message=f"節點已超過 **{int(silent)} 秒** 沒有回報數據，可能斷線或故障。",
-                color=0xFFA500
+                f"節點離線｜{node.upper()}",
+                f"已超過 {OFFLINE_TIMEOUT} 秒沒有回報",
+                0xFFA500,
             )
 
-@app.route('/')
+_last_maintenance = 0.0
+
+
+def database_maintenance() -> None:
+    """Atomically downsample expired readings, then enforce both retention limits."""
+    global _last_maintenance
+    now = time.time()
+    if now - _last_maintenance < 300:
+        return
+    raw_cutoff = now - RETENTION_SECONDS
+    hourly_cutoff = now - HOURLY_RETENTION_SECONDS
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """WITH expired AS (
+                       DELETE FROM readings WHERE recorded_at < %s
+                       RETURNING node_id,sensor,value,recorded_at
+                   )
+                   INSERT INTO readings_hourly
+                       (node_id,sensor,bucket_ts,sum_value,min_value,max_value,sample_count)
+                   SELECT node_id,sensor,FLOOR(recorded_at/3600)*3600,
+                          SUM(value),MIN(value),MAX(value),COUNT(*)
+                   FROM expired
+                   GROUP BY node_id,sensor,FLOOR(recorded_at/3600)*3600
+                   ON CONFLICT(node_id,sensor,bucket_ts) DO UPDATE SET
+                       sum_value=readings_hourly.sum_value+EXCLUDED.sum_value,
+                       min_value=LEAST(readings_hourly.min_value,EXCLUDED.min_value),
+                       max_value=GREATEST(readings_hourly.max_value,EXCLUDED.max_value),
+                       sample_count=readings_hourly.sample_count+EXCLUDED.sample_count""",
+                (raw_cutoff,),
+            )
+            cursor.execute(
+                "DELETE FROM telemetry_events WHERE recorded_at < %s", (raw_cutoff,)
+            )
+            cursor.execute(
+                "DELETE FROM readings_hourly WHERE bucket_ts < %s", (hourly_cutoff,)
+            )
+    _last_maintenance = now
+
+
+def _offline_monitor() -> None:
+    while True:
+        try:
+            check_offline_alerts()
+            database_maintenance()
+        except Exception as exc:
+            print(f"WARNING: offline monitor failed: {exc}")
+        time.sleep(min(30, max(5, OFFLINE_TIMEOUT // 3)))
+
+
+def start_offline_monitor() -> None:
+    global _monitor_started
+    with _alert_lock:
+        if _monitor_started:
+            return
+        _monitor_started = True
+    threading.Thread(target=_offline_monitor, name="offline-monitor", daemon=True).start()
+
+
+@app.get("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
+
+
+@app.post("/update")
+def update():
+    if not _authorized():
+        return jsonify(status="error", message="unauthorized"), 401
+    payload, error = _validate_payload(request.get_json(silent=True))
+    if error:
+        return jsonify(status="error", message=error), 400
+    assert payload is not None
+    now = time.time()
+    inserted = False
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO telemetry_events
+                   (event_id,node_id,recorded_at,received_at,data,meta)
+                   VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(event_id) DO NOTHING
+                   RETURNING event_id""",
+                (
+                    payload["event_id"],
+                    payload["node"],
+                    payload["recorded_at"],
+                    now,
+                    Jsonb(payload["data"]),
+                    Jsonb(payload["meta"]),
+                ),
+            )
+            inserted = cursor.fetchone() is not None
+            if inserted:
+                cursor.executemany(
+                    """INSERT INTO readings
+                       (event_id,node_id,sensor,value,recorded_at)
+                       VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                    [
+                        (
+                            payload["event_id"],
+                            payload["node"],
+                            key,
+                            value,
+                            payload["recorded_at"],
+                        )
+                        for key, value in payload["data"].items()
+                    ],
+                )
+    if inserted:
+        with db_transaction() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE alert_state SET state='online',last_sent=%s
+                       WHERE alert_key=%s AND state='offline' RETURNING alert_key""",
+                    (now, f"offline:{payload['node']}"),
+                )
+                was_offline = cursor.fetchone() is not None
+        if was_offline:
+            send_discord_alert(
+                f"節點恢復連線｜{payload['node'].upper()}",
+                "節點已重新開始回報",
+                0x39FF14,
+            )
+        check_threshold_alerts(payload["node"], payload["data"])
+    return jsonify(status="success", duplicate=not inserted), 200
+
 
 @app.get("/api/all_data")
-def get_all_data():
+def all_data():
     now = time.time()
-    # 判斷 60 秒內是否有數據更新
-    status = "online" if any(now - ts < 60 for ts in last_seen.values()) else "offline"
-    return jsonify({
-        "status": status,
-        "history": history_data,
-        "latest": latest_data,
-    })
-
-@app.get("/api/history_range/<node_id>")
-def get_history_range(node_id):
-    """ 查詢某節點過去最多 7 天的完整原始資料（不受即時圖表 100 筆上限影響） """
-    days = request.args.get("days", default=7, type=int)
-    days = max(1, min(days, 7))  # 目前只保留 7 天，超過範圍就夾住
-    cutoff = time.time() - days * 86400
-
-    rows = db_execute(
-        "SELECT sensor, value, recorded_at FROM readings WHERE node_id = %s AND recorded_at >= %s ORDER BY recorded_at ASC",
-        (node_id, cutoff), fetch=True
+    nodes: dict[str, Any] = {}
+    for node, data, meta, recorded, received in _latest_rows():
+        nodes[node] = {
+            "data": data,
+            "meta": meta,
+            "recorded_at": recorded,
+            "last_seen": received,
+            "online": now - received <= OFFLINE_TIMEOUT,
+        }
+    return jsonify(
+        status="online" if any(item["online"] for item in nodes.values()) else "offline",
+        offline_timeout=OFFLINE_TIMEOUT,
+        nodes=nodes,
     )
 
-    timestamps = sorted(set(r[2] for r in rows))
-    labels = [(datetime.utcfromtimestamp(ts) + timedelta(hours=8)).strftime("%m/%d %H:%M:%S") for ts in timestamps]
 
-    by_sensor = {}
-    for sensor, value, ts in rows:
-        by_sensor.setdefault(sensor, {})[ts] = value
-
-    result = {"labels": labels}
-    for sensor, ts_map in by_sensor.items():
-        result[sensor] = [ts_map.get(ts) for ts in timestamps]
-
-    return jsonify(result)
-
-@app.get("/api/history_hourly/<node_id>")
-def get_history_hourly(node_id):
-    """ 查詢降採樣後的長期資料（每小時統計，最多回溯 365 天）。
-        每個感測器回傳三組陣列：平均值（感測器名）、最低（_min）、最高（_max）。 """
-    days = request.args.get("days", default=30, type=int)
-    days = max(1, min(days, 365))
-    cutoff = time.time() - days * 86400
-
-    rows = db_execute(
-        """SELECT sensor, bucket_ts, sum_value / sample_count, min_value, max_value
-           FROM readings_hourly WHERE node_id = %s AND bucket_ts >= %s ORDER BY bucket_ts ASC""",
-        (node_id, cutoff), fetch=True
+def _history(node: str, cutoff: float) -> dict[str, Any]:
+    if not NODE_RE.fullmatch(node):
+        return {"labels": []}
+    rows = db_fetch(
+        """SELECT recorded_at,data FROM telemetry_events
+           WHERE node_id=%s AND recorded_at >= %s
+           ORDER BY recorded_at,event_id""",
+        (node, cutoff),
     )
+    sensors = sorted({key for _ts, data in rows for key in data})
+    result: dict[str, Any] = {
+        "labels": [
+            datetime.fromtimestamp(ts, timezone(timedelta(hours=8))).strftime(
+                "%m/%d %H:%M:%S"
+            )
+            for ts, _data in rows
+        ]
+    }
+    for sensor in sensors:
+        result[sensor] = [data.get(sensor) for _ts, data in rows]
+    return result
 
-    timestamps = sorted(set(r[1] for r in rows))
-    labels = [(datetime.utcfromtimestamp(ts) + timedelta(hours=8)).strftime("%m/%d %H:00") for ts in timestamps]
 
-    by_sensor = {}
-    for sensor, ts, avg_v, min_v, max_v in rows:
-        by_sensor.setdefault(sensor, {})[ts] = (round(avg_v, 2), min_v, max_v)
+@app.get("/api/history_range/<node>")
+def history_range(node: str):
+    days = max(1, min(request.args.get("days", 7, type=int), 7))
+    return jsonify(_history(node, time.time() - days * 86400))
 
-    result = {"labels": labels}
-    for sensor, ts_map in by_sensor.items():
-        result[sensor] = [ts_map[ts][0] if ts in ts_map else None for ts in timestamps]
-        result[f"{sensor}_min"] = [ts_map[ts][1] if ts in ts_map else None for ts in timestamps]
-        result[f"{sensor}_max"] = [ts_map[ts][2] if ts in ts_map else None for ts in timestamps]
 
+@app.get("/api/history_hourly/<node>")
+def history_hourly(node: str):
+    if not NODE_RE.fullmatch(node):
+        return jsonify(labels=[])
+    days = max(1, min(request.args.get("days", 30, type=int), 365))
+    rows = db_fetch(
+        """SELECT sensor,bucket_ts,sum_value/sample_count,min_value,max_value
+           FROM readings_hourly WHERE node_id=%s AND bucket_ts >= %s
+           ORDER BY bucket_ts,sensor""",
+        (node, time.time() - days * 86400),
+    )
+    timestamps = sorted({row[1] for row in rows})
+    values = {(sensor, ts): (avg, low, high) for sensor, ts, avg, low, high in rows}
+    result: dict[str, Any] = {
+        "labels": [
+            datetime.fromtimestamp(ts, timezone(timedelta(hours=8))).strftime("%m/%d %H:00")
+            for ts in timestamps
+        ]
+    }
+    for sensor in sorted({row[0] for row in rows}):
+        result[sensor] = [values.get((sensor, ts), (None, None, None))[0] for ts in timestamps]
+        result[f"{sensor}_min"] = [values.get((sensor, ts), (None, None, None))[1] for ts in timestamps]
+        result[f"{sensor}_max"] = [values.get((sensor, ts), (None, None, None))[2] for ts in timestamps]
     return jsonify(result)
 
-@app.route('/update', methods=['POST'])
-def update():
-    global latest_data, history_data
-    req = request.json
-    if not req or "node" not in req: return {"status": "error"}, 400
-
-    node_id = req["node"]
-    sensor_batch = req["data"]
-    last_seen[node_id] = time.time()
-
-    # 若此節點先前被判定離線，現在又回報了 → 發「恢復連線」通知並解除離線標記
-    if node_id in offline_nodes:
-        offline_nodes.discard(node_id)
-        send_discord_alert(
-            title=f"✅ 節點恢復連線｜{node_id.upper()}",
-            message="節點已重新開始回報數據，連線恢復正常。",
-            color=0x39FF14
-        )
-
-    # 優先採用封包自帶的原始時間戳（斷線補傳資料也一樣），確保時間序列不因補傳而錯亂
-    try:
-        event_ts = float(req["recorded_at"])
-    except (KeyError, TypeError, ValueError):
-        event_ts = time.time()
-    event_dt = datetime.utcfromtimestamp(event_ts)
-    current_time = (event_dt + timedelta(hours=8)).strftime("%H:%M:%S")
-
-    if node_id not in history_data:
-        history_data[node_id] = {"labels": []}
-
-    node_hist = history_data[node_id]
-    node_hist["labels"].append(current_time)
-
-    # 硬體簡稱對應前端 Key
-    mapping = {"t": "temp", "h": "hum", "c": "co2", "v": "volt"}
-
-    node_latest = latest_data.setdefault(node_id, {})
-    parsed_values = {}
-
-    # 更新數值並寫入歷史
-    for key, val in sensor_batch.items():
-        num_val = round(float(val), 2)
-        node_latest[key] = str(num_val)
-        parsed_values[key] = num_val
-
-        hist_key = mapping.get(key, key)
-        if hist_key not in node_hist:
-            # 新感測器：先用 0 補齊先前的長度
-            node_hist[hist_key] = [0.0] * (len(node_hist["labels"]) - 1)
-        node_hist[hist_key].append(num_val)
-
-    # 數據長度校準：確保所有陣列與 labels 等長
-    for k in node_hist.keys():
-        if len(node_hist[k]) < len(node_hist["labels"]):
-            node_hist[k].append(node_hist[k][-1] if node_hist[k] else 0.0)
-        if len(node_hist[k]) > 100: node_hist[k].pop(0)
-
-    save_node_state(node_id)
-    log_reading(node_id, parsed_values, event_ts)
-
-    # 資料存好後才判斷警報：先看這批數值有沒有超標，再掃描有沒有節點離線
-    check_threshold_alerts(node_id, sensor_batch)
-    check_offline_alerts()
-
-    return {"status": "success"}, 200
 
 @app.get("/api/test-alert")
 def test_alert():
-    """ 手動測試：打開這個網址就會送一則測試警報到 Discord，用來確認設定成功 """
-    if not DISCORD_WEBHOOK_URL:
-        return {"status": "error", "message": "尚未設定 DISCORD_WEBHOOK_URL 環境變數"}, 400
-    send_discord_alert(
-        title="🔔 測試通知",
-        message="如果你在 Discord 看到這則訊息，代表警報通知已設定成功！",
-        color=0x0088FF
-    )
-    return {"status": "success", "message": "測試通知已送出，請查看 Discord 頻道"}, 200
+    if not _authorized():
+        return jsonify(status="error", message="unauthorized"), 401
+    send_discord_alert("測試通知", "LoRa 警報通知設定成功", 0x0088FF)
+    return jsonify(status="success"), 200
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+
+init_db()
+start_offline_monitor()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
