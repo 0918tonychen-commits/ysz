@@ -53,7 +53,8 @@ def init_local_cache() -> None:
                 payload TEXT NOT NULL,
                 recorded_at REAL NOT NULL,
                 retries INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT
+                last_error TEXT,
+                dead_letter INTEGER NOT NULL DEFAULT 0
             )"""
         )
         columns = {
@@ -65,6 +66,10 @@ def init_local_cache() -> None:
             conn.execute("ALTER TABLE cache ADD COLUMN recorded_at REAL")
         if "last_error" not in columns:
             conn.execute("ALTER TABLE cache ADD COLUMN last_error TEXT")
+        if "dead_letter" not in columns:
+            conn.execute(
+                "ALTER TABLE cache ADD COLUMN dead_letter INTEGER NOT NULL DEFAULT 0"
+            )
         columns = {
             row[1] for row in conn.execute("PRAGMA table_info(cache)").fetchall()
         }
@@ -81,7 +86,18 @@ def init_local_cache() -> None:
 def cache_count() -> int:
     init_local_cache()
     with _connect() as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0])
+        return int(
+            conn.execute("SELECT COUNT(*) FROM cache WHERE dead_letter=0").fetchone()[0]
+        )
+
+
+def dead_letter_count() -> int:
+    """Number of permanently rejected/corrupt events retained for diagnosis."""
+    init_local_cache()
+    with _connect() as conn:
+        return int(
+            conn.execute("SELECT COUNT(*) FROM cache WHERE dead_letter=1").fetchone()[0]
+        )
 
 
 def _envelope(
@@ -163,16 +179,20 @@ def flush_local_cache() -> int:
         init_local_cache()
         with _connect() as conn:
             rows = conn.execute(
-                "SELECT id,payload,retries FROM cache ORDER BY recorded_at,id LIMIT ?",
+                """SELECT id,payload,retries FROM cache
+                   WHERE dead_letter=0 ORDER BY recorded_at,id LIMIT ?""",
                 (_flush_batch,),
             ).fetchall()
         for row_id, encoded, retries in rows:
             try:
                 envelope = json.loads(encoded)
             except (TypeError, json.JSONDecodeError) as exc:
-                print(f"CRITICAL: dropping corrupt cached JSON row {row_id}: {exc}")
+                print(f"CRITICAL: quarantining corrupt cached JSON row {row_id}: {exc}")
                 with _connect() as conn:
-                    conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
+                    conn.execute(
+                        "UPDATE cache SET dead_letter=1,last_error=? WHERE id=?",
+                        (f"invalid JSON: {exc}"[:500], row_id),
+                    )
                 continue
             try:
                 response = _post(envelope, 2.0)
@@ -189,9 +209,15 @@ def flush_local_cache() -> int:
                     conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
                 sent += 1
             elif status in PERMANENT_STATUSES:
-                print(f"ERROR: permanently rejected cached event row {row_id}: HTTP {status}")
+                print(
+                    f"ERROR: quarantining permanently rejected event row "
+                    f"{row_id}: HTTP {status}"
+                )
                 with _connect() as conn:
-                    conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
+                    conn.execute(
+                        "UPDATE cache SET dead_letter=1,last_error=? WHERE id=?",
+                        (f"HTTP {status}", row_id),
+                    )
             else:
                 with _connect() as conn:
                     conn.execute(

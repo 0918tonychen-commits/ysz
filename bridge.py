@@ -9,9 +9,12 @@ import time
 from typing import Any
 
 import serial
+from dotenv import load_dotenv
 
 import gateway_cache
 from lora_payload import MCountTracker, parse_payload
+
+load_dotenv()
 
 COM_PORT = os.environ.get("LORA_COM_PORT", "COM6")
 BAUD_RATE = int(os.environ.get("LORA_BAUD_RATE", "115200"))
@@ -83,6 +86,14 @@ class Gateway:
 
     def run(self) -> None:
         gateway_cache.configure(BACKEND_URL, LOCAL_DB, API_KEY)
+        pending = gateway_cache.cache_count()
+        quarantined = gateway_cache.dead_letter_count()
+        print(
+            f"Gateway cache ready: {pending} pending, "
+            f"{quarantined} quarantined"
+        )
+        if not API_KEY:
+            print("WARNING: LORA_API_KEY is empty; protected backend uploads will fail")
         uploader = threading.Thread(target=self._uploader, name="uploader", daemon=False)
         uploader.start()
         try:

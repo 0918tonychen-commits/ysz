@@ -17,6 +17,25 @@ def test_relay_packet_and_radio_metrics():
     assert payload["meta"]["snr"] == 7.5
 
 
+def test_legacy_meta_aliases_and_hop_metrics():
+    raw = (
+        "s10_m8,t,24,gw_rssi,-81,gw_snr,6.5,"
+        "hop_rssi,-72,hop_snr:4.5,level,2,via,s02"
+    )
+    _node, payload, status = parse_payload(raw, MCountTracker())
+    assert status == "valid"
+    assert payload["meta"] == {
+        "mcount": 8,
+        "via": ["s02"],
+        "rssi": -81.0,
+        "snr": 6.5,
+        "hop_rssi": -72.0,
+        "hop_snr": 4.5,
+        "level": 2.0,
+        "loss": 0.0,
+    }
+
+
 def test_duplicate_and_out_of_order():
     tracker = MCountTracker()
     assert parse_payload("s05_m10,t,1", tracker)[2] == "valid"

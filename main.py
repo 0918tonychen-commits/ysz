@@ -390,21 +390,29 @@ def update():
                         for key, value in payload["data"].items()
                     ],
                 )
-    if inserted:
-        with db_transaction() as conn:
-            with conn.cursor() as cursor:
+            else:
+                # A retry after a lost HTTP response is not a new reading, but it
+                # proves the node/gateway path is alive now.
                 cursor.execute(
-                    """UPDATE alert_state SET state='online',last_sent=%s
-                       WHERE alert_key=%s AND state='offline' RETURNING alert_key""",
-                    (now, f"offline:{payload['node']}"),
+                    """UPDATE telemetry_events SET received_at=GREATEST(received_at,%s)
+                       WHERE event_id=%s""",
+                    (now, payload["event_id"]),
                 )
-                was_offline = cursor.fetchone() is not None
-        if was_offline:
-            send_discord_alert(
-                f"節點恢復連線｜{payload['node'].upper()}",
-                "節點已重新開始回報",
-                0x39FF14,
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """UPDATE alert_state SET state='online',last_sent=%s
+                   WHERE alert_key=%s AND state='offline' RETURNING alert_key""",
+                (now, f"offline:{payload['node']}"),
             )
+            was_offline = cursor.fetchone() is not None
+    if was_offline:
+        send_discord_alert(
+            f"節點恢復連線｜{payload['node'].upper()}",
+            "節點已重新開始回報",
+            0x39FF14,
+        )
+    if inserted:
         check_threshold_alerts(payload["node"], payload["data"])
     return jsonify(status="success", duplicate=not inserted), 200
 
@@ -426,6 +434,16 @@ def all_data():
         offline_timeout=OFFLINE_TIMEOUT,
         nodes=nodes,
     )
+
+
+@app.get("/healthz")
+def healthz():
+    """Deployment health probe: verifies the process and PostgreSQL connection."""
+    try:
+        row = db_fetch("SELECT 1")
+    except psycopg.Error:
+        return jsonify(status="error", database="unavailable"), 503
+    return jsonify(status="ok", database="ok" if row == [(1,)] else "unexpected"), 200
 
 
 def _history(node: str, cutoff: float) -> dict[str, Any]:

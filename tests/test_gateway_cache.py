@@ -65,3 +65,4 @@ def test_permanent_400_does_not_block_following_event(tmp_path, monkeypatch):
     )
     assert gateway_cache.flush_local_cache() == 1
     assert gateway_cache.cache_count() == 0
+    assert gateway_cache.dead_letter_count() == 1

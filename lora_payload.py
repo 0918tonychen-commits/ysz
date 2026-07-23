@@ -19,6 +19,10 @@ SNR_RE = re.compile(
     r"(?:^|,)\s*snr\s*[:=,]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))(?=\s*,|$)",
     re.IGNORECASE,
 )
+INLINE_PAIR_RE = re.compile(
+    r"^([a-z][a-z0-9_]*)\s*[:=]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))$",
+    re.IGNORECASE,
+)
 
 META_KEYS = {
     "mcount",
@@ -41,6 +45,20 @@ SENSOR_ALIASES = {
     "c": "co2",
     "v": "voltage",
     "volt": "voltage",
+}
+META_ALIASES = {
+    "msg": "mcount",
+    "gw_rssi": "rssi",
+    "gw_snr": "snr",
+}
+NUMERIC_META_KEYS = {
+    "mcount",
+    "rssi",
+    "snr",
+    "hop_rssi",
+    "hop_snr",
+    "loss",
+    "level",
 }
 
 
@@ -113,6 +131,27 @@ def parse_payload(
             if route != node and route not in meta["via"]:
                 meta["via"].append(route)
 
+    # Accept both ``key,value`` and ``key:value`` forms used by old firmware.
+    for index, token in enumerate(tokens):
+        key = token.lower()
+        value: str | None = None
+        inline = INLINE_PAIR_RE.fullmatch(token)
+        if inline:
+            key, value = inline.group(1).lower(), inline.group(2)
+        elif index + 1 < len(tokens) and NUMBER_RE.fullmatch(tokens[index + 1]):
+            value = tokens[index + 1]
+        canonical = META_ALIASES.get(key, key)
+        if canonical in NUMERIC_META_KEYS and value is not None:
+            number = float(value)
+            meta[canonical] = int(number) if canonical == "mcount" else number
+
+    # Also support an explicit ``via,s02`` pair.
+    for index, token in enumerate(tokens[:-1]):
+        if token.lower() == "via" and NODE_RE.fullmatch(tokens[index + 1]):
+            route = tokens[index + 1].lower()
+            if route != node and route not in meta["via"]:
+                meta["via"].append(route)
+
     index = source_index + 1
     while index + 1 < len(tokens):
         key = tokens[index].lower()
@@ -132,6 +171,9 @@ def parse_payload(
         meta["rssi"] = int(rssi_match.group(1))
     if snr_match:
         meta["snr"] = float(snr_match.group(1))
+
+    # The source suffix is authoritative even if a legacy msg/mcount pair differs.
+    meta["mcount"] = mcount
 
     if not data:
         return node, None, "incomplete"
