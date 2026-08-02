@@ -171,6 +171,55 @@ def _post(envelope: dict[str, Any], timeout: float) -> requests.Response:
     return requests.post(_backend_url, json=envelope, headers=headers, timeout=timeout)
 
 
+def _api_base() -> str:
+    if _backend_url.endswith("/update"):
+        return _backend_url[: -len("/update")]
+    return _backend_url
+
+
+def fetch_pending_commands(timeout: float = 3.0) -> list[dict[str, Any]]:
+    """Claim queued downlink commands from the backend for delivery over serial."""
+    if not _backend_url:
+        return []
+    headers = {"X-API-Key": _api_key} if _api_key else {}
+    try:
+        response = requests.get(
+            f"{_api_base()}/api/commands/pending", headers=headers, timeout=timeout
+        )
+        if response.status_code == 200:
+            commands = response.json().get("commands", [])
+            if isinstance(commands, list):
+                return commands
+    except (requests.RequestException, ValueError) as exc:
+        print(f"WARNING: command poll failed: {exc}")
+    return []
+
+
+def report_command_ack(
+    node: str,
+    cmd_id: str,
+    result: str,
+    *,
+    rssi: int | None = None,
+    snr: float | None = None,
+    timeout: float = 3.0,
+) -> None:
+    if not _backend_url:
+        return
+    headers = {"X-API-Key": _api_key} if _api_key else {}
+    body: dict[str, Any] = {"node": node, "cmd_id": cmd_id, "result": result}
+    if rssi is not None:
+        body["rssi"] = rssi
+    if snr is not None:
+        body["snr"] = snr
+    try:
+        requests.post(
+            f"{_api_base()}/api/commands/ack", json=body, headers=headers, timeout=timeout
+        )
+    except requests.RequestException as exc:
+        print(f"WARNING: command ACK report failed: {exc}")
+
+
 def flush_local_cache() -> int:
     if not _flush_lock.acquire(blocking=False):
         return 0

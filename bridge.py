@@ -12,7 +12,7 @@ import serial
 from dotenv import load_dotenv
 
 import gateway_cache
-from lora_payload import MCountTracker, parse_payload
+from lora_payload import MCountTracker, parse_ack_line, parse_payload
 
 load_dotenv()
 
@@ -23,6 +23,7 @@ LOCAL_DB = os.environ.get("GATEWAY_CACHE_DB", "gateway_cache.db")
 API_KEY = os.environ.get("LORA_API_KEY", "")
 QUEUE_SIZE = int(os.environ.get("UPLOAD_QUEUE_SIZE", "256"))
 MAX_SERIAL_LINE = 8192
+COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
 
 
 class SerialWriter:
@@ -47,6 +48,7 @@ class Gateway:
         )
         self.tracker = MCountTracker()
         self.serial_port: serial.Serial | None = None
+        self.serial_writer: SerialWriter | None = None
 
     def enqueue(self, node: str, payload: dict[str, Any], recorded_at: float) -> None:
         try:
@@ -75,6 +77,19 @@ class Gateway:
                 self.upload_queue.task_done()
 
     def _handle_line(self, line: str) -> None:
+        if "【ACK】" in line:
+            ack = parse_ack_line(line)
+            if ack:
+                gateway_cache.report_command_ack(
+                    ack["node"],
+                    ack["cmd_id"],
+                    ack["result"],
+                    rssi=ack.get("rssi"),
+                    snr=ack.get("snr"),
+                )
+            else:
+                print(f"WARNING: malformed ACK line: {line[:200]}")
+            return
         if "數據:" not in line:
             return
         raw = line.split("數據:", 1)[1].strip()
@@ -83,6 +98,33 @@ class Gateway:
             self.enqueue(node, payload, time.time())
         elif status not in {"duplicate", "out_of_order"}:
             print(f"WARNING: ignored LoRa payload ({status}): {raw[:200]}")
+
+    def _command_poller(self) -> None:
+        while not self.stop_event.is_set():
+            for command in gateway_cache.fetch_pending_commands():
+                self._dispatch_command(command)
+            self.stop_event.wait(COMMAND_POLL_INTERVAL)
+
+    def _dispatch_command(self, command: dict[str, Any]) -> None:
+        if self.serial_writer is None:
+            return
+        cmd_id, node, cmd, arg = (
+            command.get("cmd_id"),
+            command.get("node"),
+            command.get("cmd"),
+            command.get("arg") or "",
+        )
+        if not cmd_id or not node or not cmd:
+            print(f"WARNING: skipping malformed pending command: {command}")
+            return
+        line = f"CMD {cmd_id} {node} {cmd}"
+        if arg:
+            line += f" {arg}"
+        try:
+            self.serial_writer.write_line(line)
+            print(f"Dispatched command to serial: {line}")
+        except (ValueError, serial.SerialException) as exc:
+            print(f"WARNING: failed to dispatch command {cmd_id}: {exc}")
 
     def run(self) -> None:
         gateway_cache.configure(BACKEND_URL, LOCAL_DB, API_KEY)
@@ -98,7 +140,12 @@ class Gateway:
         uploader.start()
         try:
             self.serial_port = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.25)
+            self.serial_writer = SerialWriter(self.serial_port)
             print(f"LoRa gateway listening on {COM_PORT} at {BAUD_RATE} baud")
+            poller = threading.Thread(
+                target=self._command_poller, name="command-poller", daemon=True
+            )
+            poller.start()
             buffer = bytearray()
             while not self.stop_event.is_set():
                 try:

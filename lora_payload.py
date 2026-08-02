@@ -23,6 +23,7 @@ INLINE_PAIR_RE = re.compile(
     r"^([a-z][a-z0-9_]*)\s*[:=]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))$",
     re.IGNORECASE,
 )
+ACK_FIELD_RE = re.compile(r"(\w+)\s*=\s*([^,]+)")
 
 META_KEYS = {
     "mcount",
@@ -33,8 +34,10 @@ META_KEYS = {
     "gw_snr",
     "hop_rssi",
     "hop_snr",
+    "r_in",
     "loss",
     "level",
+    "fallback",
     "via",
 }
 SENSOR_ALIASES = {
@@ -50,6 +53,7 @@ META_ALIASES = {
     "msg": "mcount",
     "gw_rssi": "rssi",
     "gw_snr": "snr",
+    "r_in": "hop_rssi",
 }
 NUMERIC_META_KEYS = {
     "mcount",
@@ -59,6 +63,7 @@ NUMERIC_META_KEYS = {
     "hop_snr",
     "loss",
     "level",
+    "fallback",
 }
 
 
@@ -143,7 +148,19 @@ def parse_payload(
         canonical = META_ALIASES.get(key, key)
         if canonical in NUMERIC_META_KEYS and value is not None:
             number = float(value)
-            meta[canonical] = int(number) if canonical == "mcount" else number
+            if canonical == "mcount":
+                meta[canonical] = int(number)
+                continue
+            # A relayed packet gains one rssi/snr pair per hop with the same
+            # key name; keep every hop instead of letting the last one win.
+            existing = meta.get(canonical)
+            if canonical in meta:
+                if isinstance(existing, list):
+                    existing.append(number)
+                else:
+                    meta[canonical] = [existing, number]
+            else:
+                meta[canonical] = number
 
     # Also support an explicit ``via,s02`` pair.
     for index, token in enumerate(tokens[:-1]):
@@ -165,11 +182,14 @@ def parse_payload(
         else:
             index += 1
 
+    # Fallback for formats the token loop above didn't already capture; must
+    # not override it, or a later single regex match would discard the
+    # per-hop list built above for a relayed packet.
     rssi_match = RSSI_RE.search(raw)
     snr_match = SNR_RE.search(raw)
-    if rssi_match:
+    if rssi_match and "rssi" not in meta:
         meta["rssi"] = int(rssi_match.group(1))
-    if snr_match:
+    if snr_match and "snr" not in meta:
         meta["snr"] = float(snr_match.group(1))
 
     # The source suffix is authoritative even if a legacy msg/mcount pair differs.
@@ -187,3 +207,25 @@ def parse_payload(
         meta["loss"] = 0.0
 
     return node, {"data": data, "meta": meta}, "valid"
+
+
+def parse_ack_line(line: str) -> dict[str, Any] | None:
+    """Parse an L1 gateway ACK line: ``from=s03, cmdId=C001, result=OK, rssi=-65, snr=6.1``.
+
+    Unlike sensor uplinks this is a plain ``key=value`` list, not the
+    positional comma format ``parse_payload`` expects.
+    """
+    fields = dict(ACK_FIELD_RE.findall(line))
+    node = fields.get("from", "").strip().lower()
+    cmd_id = fields.get("cmdId", "").strip()
+    result = fields.get("result", "").strip()
+    if not node or not NODE_RE.fullmatch(node) or not cmd_id or not result:
+        return None
+    ack: dict[str, Any] = {"node": node, "cmd_id": cmd_id, "result": result}
+    rssi = fields.get("rssi", "").strip()
+    if rssi and NUMBER_RE.fullmatch(rssi):
+        ack["rssi"] = int(float(rssi))
+    snr = fields.get("snr", "").strip()
+    if snr and NUMBER_RE.fullmatch(snr):
+        ack["snr"] = float(snr)
+    return ack

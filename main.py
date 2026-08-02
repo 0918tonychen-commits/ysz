@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import secrets
 import threading
 import time
 from typing import Any
@@ -35,7 +36,7 @@ HOURLY_RETENTION_SECONDS = 365 * 86400
 NODE_RE = re.compile(r"^s\d{2,}$")
 SENSOR_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 EVENT_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
-META_NUMERIC = {"mcount", "rssi", "snr", "hop_rssi", "hop_snr", "loss", "level"}
+META_NUMERIC = {"mcount", "rssi", "snr", "hop_rssi", "hop_snr", "loss", "level", "fallback"}
 META_ALLOWED = META_NUMERIC | {"via", "boot_id"}
 ALERT_RULES = {
     "co2": {"max": 1000, "label": "CO₂", "unit": "ppm"},
@@ -43,6 +44,19 @@ ALERT_RULES = {
     "pm10": {"max": 150, "label": "PM10", "unit": "µg/m³"},
     "temperature": {"max": 40, "label": "溫度", "unit": "°C"},
 }
+COMMAND_ALLOWLIST = {
+    "PING",
+    "SET_TARGET",
+    "SET_BACKUP",
+    "SET_LEVEL",
+    "SET_INTERVAL",
+    "PROMOTE",
+    "DEMOTE",
+    "REBOOT",
+    "DUMP",
+}
+CMD_ARG_RE = re.compile(r"^[A-Za-z0-9_]{0,16}$")
+COMMAND_TIMEOUT_SECONDS = 300
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required")
@@ -140,6 +154,27 @@ def init_db() -> None:
                     last_sent DOUBLE PRECISION NOT NULL
                 )"""
             )
+            cursor.execute(
+                """CREATE TABLE IF NOT EXISTS commands (
+                    cmd_id TEXT PRIMARY KEY,
+                    node TEXT NOT NULL,
+                    cmd TEXT NOT NULL,
+                    arg TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    result TEXT,
+                    created_at DOUBLE PRECISION NOT NULL,
+                    sent_at DOUBLE PRECISION,
+                    acked_at DOUBLE PRECISION
+                )"""
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_commands_status "
+                "ON commands(status,created_at)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_commands_node "
+                "ON commands(node,created_at)"
+            )
 
 
 def _authorized() -> bool:
@@ -187,6 +222,18 @@ def _validate_payload(body: Any) -> tuple[dict[str, Any] | None, str | None]:
             if not isinstance(value, str) or len(value) > 64:
                 return None, "invalid boot_id"
             clean_meta[key] = value
+        elif isinstance(value, list):
+            # Multi-hop relays report one rssi/snr per hop under the same key.
+            if (
+                not value
+                or len(value) > 16
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in value)
+            ):
+                return None, f"meta.{key} must be a list of numbers"
+            numbers = [float(v) for v in value]
+            if not all(math.isfinite(v) for v in numbers):
+                return None, f"meta.{key} must be finite"
+            clean_meta[key] = numbers
         else:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 return None, f"meta.{key} must be numeric"
@@ -283,6 +330,17 @@ def check_offline_alerts() -> None:
                 0xFFA500,
             )
 
+def check_command_timeouts() -> None:
+    """Give up on downlink commands that were dispatched but never ACKed."""
+    cutoff = time.time() - COMMAND_TIMEOUT_SECONDS
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE commands SET status='timeout' WHERE status='sent' AND sent_at < %s",
+                (cutoff,),
+            )
+
+
 _last_maintenance = 0.0
 
 
@@ -328,6 +386,7 @@ def _offline_monitor() -> None:
         try:
             check_offline_alerts()
             database_maintenance()
+            check_command_timeouts()
         except Exception as exc:
             print(f"WARNING: offline monitor failed: {exc}")
         time.sleep(min(30, max(5, OFFLINE_TIMEOUT // 3)))
@@ -507,6 +566,136 @@ def test_alert():
         return jsonify(status="error", message="unauthorized"), 401
     send_discord_alert("測試通知", "LoRa 警報通知設定成功", 0x0088FF)
     return jsonify(status="success"), 200
+
+
+def _command_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    cmd_id, node, cmd, arg, status, result, created_at, sent_at, acked_at = row
+    return {
+        "cmd_id": cmd_id,
+        "node": node,
+        "cmd": cmd,
+        "arg": arg,
+        "status": status,
+        "result": result,
+        "created_at": created_at,
+        "sent_at": sent_at,
+        "acked_at": acked_at,
+    }
+
+
+@app.post("/api/commands")
+def create_command():
+    """Operator-facing: queue a downlink command for a node."""
+    if not _authorized():
+        return jsonify(status="error", message="unauthorized"), 401
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(status="error", message="JSON body must be an object"), 400
+    node, cmd, arg = body.get("node"), body.get("cmd"), body.get("arg", "")
+    if not isinstance(node, str) or not NODE_RE.fullmatch(node):
+        return jsonify(status="error", message="invalid node"), 400
+    if not isinstance(cmd, str) or cmd not in COMMAND_ALLOWLIST:
+        return jsonify(status="error", message="invalid cmd"), 400
+    if not isinstance(arg, str) or not CMD_ARG_RE.fullmatch(arg):
+        return jsonify(status="error", message="invalid arg"), 400
+    cmd_id = "C" + secrets.token_hex(4)
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO commands(cmd_id,node,cmd,arg,status,created_at)
+                   VALUES (%s,%s,%s,%s,'pending',%s)""",
+                (cmd_id, node, cmd, arg, time.time()),
+            )
+    return jsonify(status="success", cmd_id=cmd_id), 201
+
+
+@app.get("/api/commands/pending")
+def pending_commands():
+    """Gateway-facing: claim queued commands for delivery over serial."""
+    if not _authorized():
+        return jsonify(status="error", message="unauthorized"), 401
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """WITH claimed AS (
+                       SELECT cmd_id FROM commands
+                       WHERE status='pending' ORDER BY created_at LIMIT 10
+                   )
+                   UPDATE commands SET status='sent',sent_at=%s
+                   WHERE cmd_id IN (SELECT cmd_id FROM claimed)
+                   RETURNING cmd_id,node,cmd,arg""",
+                (time.time(),),
+            )
+            rows = cursor.fetchall()
+    commands = [
+        {"cmd_id": cmd_id, "node": node, "cmd": cmd, "arg": arg}
+        for cmd_id, node, cmd, arg in rows
+    ]
+    return jsonify(commands=commands), 200
+
+
+@app.post("/api/commands/ack")
+def command_ack():
+    """Gateway-facing: report that a node executed a command and replied."""
+    if not _authorized():
+        return jsonify(status="error", message="unauthorized"), 401
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(status="error", message="JSON body must be an object"), 400
+    cmd_id, node, result = body.get("cmd_id"), body.get("node"), body.get("result")
+    if not isinstance(cmd_id, str) or not cmd_id or len(cmd_id) > 32:
+        return jsonify(status="error", message="invalid cmd_id"), 400
+    if not isinstance(node, str) or not NODE_RE.fullmatch(node):
+        return jsonify(status="error", message="invalid node"), 400
+    if not isinstance(result, str) or not result or len(result) > 64:
+        return jsonify(status="error", message="invalid result"), 400
+    with db_transaction() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """UPDATE commands SET status='acked',result=%s,acked_at=%s
+                   WHERE cmd_id=%s RETURNING cmd_id""",
+                (result, time.time(), cmd_id),
+            )
+            updated = cursor.fetchone() is not None
+    if not updated:
+        return jsonify(status="error", message="unknown cmd_id"), 404
+    send_discord_alert(
+        f"指令已執行｜{node.upper()}",
+        f"cmd_id={cmd_id} 結果={result}",
+        0x39FF14 if result.startswith("OK") else 0xFF003C,
+    )
+    return jsonify(status="success"), 200
+
+
+@app.get("/api/commands")
+def list_commands():
+    node = request.args.get("node")
+    if node is not None and not NODE_RE.fullmatch(node):
+        return jsonify(commands=[]), 200
+    if node:
+        rows = db_fetch(
+            """SELECT cmd_id,node,cmd,arg,status,result,created_at,sent_at,acked_at
+               FROM commands WHERE node=%s ORDER BY created_at DESC LIMIT 20""",
+            (node,),
+        )
+    else:
+        rows = db_fetch(
+            """SELECT cmd_id,node,cmd,arg,status,result,created_at,sent_at,acked_at
+               FROM commands ORDER BY created_at DESC LIMIT 50"""
+        )
+    return jsonify(commands=[_command_row_to_dict(row) for row in rows]), 200
+
+
+@app.get("/api/commands/<cmd_id>")
+def command_status(cmd_id: str):
+    rows = db_fetch(
+        """SELECT cmd_id,node,cmd,arg,status,result,created_at,sent_at,acked_at
+           FROM commands WHERE cmd_id=%s""",
+        (cmd_id,),
+    )
+    if not rows:
+        return jsonify(status="error", message="unknown cmd_id"), 404
+    return jsonify(_command_row_to_dict(rows[0])), 200
 
 
 init_db()

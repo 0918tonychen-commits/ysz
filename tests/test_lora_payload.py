@@ -1,4 +1,4 @@
-from lora_payload import MCountTracker, parse_payload
+from lora_payload import MCountTracker, parse_ack_line, parse_payload
 
 
 def test_normal_packet():
@@ -66,6 +66,50 @@ def test_snr_regex_rejects_malformed_number():
     _node, payload, status = parse_payload("s10_m1,t,2,snr:1.2.3", MCountTracker())
     assert status == "valid"
     assert "snr" not in payload["meta"]
+
+
+def test_fallback_flag_is_captured():
+    raw = "s07_m3,t,22,level,3,fallback,1"
+    _node, payload, status = parse_payload(raw, MCountTracker())
+    assert status == "valid"
+    assert payload["meta"]["level"] == 3.0
+    assert payload["meta"]["fallback"] == 1.0
+
+
+def test_router_hop_rssi_alias_does_not_leak_into_data():
+    raw = "s02,L3,s03_m9,t,24.5,via,s02,r_in,-73,snr,5.2"
+    _node, payload, status = parse_payload(raw, MCountTracker())
+    assert status == "valid"
+    assert payload["data"] == {"temperature": 24.5}
+    assert payload["meta"]["hop_rssi"] == -73.0
+    assert payload["meta"]["snr"] == 5.2
+    assert "r_in" not in payload["data"]
+
+
+def test_multi_hop_rssi_and_snr_are_kept_per_hop_not_overwritten():
+    raw = "s01,L3,s05_m3,t,20,via,s02,r_in,-70,snr,5.0,via,s01,r_in,-60,snr,6.0"
+    _node, payload, status = parse_payload(raw, MCountTracker())
+    assert status == "valid"
+    assert payload["meta"]["via"] == ["s02", "s01"]
+    assert payload["meta"]["hop_rssi"] == [-70.0, -60.0]
+    assert payload["meta"]["snr"] == [5.0, 6.0]
+
+
+def test_parse_ack_line():
+    line = "【ACK】from=s03, cmdId=C001, result=OK, rssi=-65, snr=6.1"
+    ack = parse_ack_line(line)
+    assert ack == {"node": "s03", "cmd_id": "C001", "result": "OK", "rssi": -65, "snr": 6.1}
+
+
+def test_parse_ack_line_without_radio_metrics():
+    line = "【ACK】from=s03, cmdId=C002, result=ERR:BAD_ARG"
+    ack = parse_ack_line(line)
+    assert ack == {"node": "s03", "cmd_id": "C002", "result": "ERR:BAD_ARG"}
+
+
+def test_parse_ack_line_rejects_malformed():
+    assert parse_ack_line("【ACK】from=notanode, cmdId=C003, result=OK") is None
+    assert parse_ack_line("【路由】s03 via s02") is None
 
 
 def test_reboot_zero_after_grace_period():
