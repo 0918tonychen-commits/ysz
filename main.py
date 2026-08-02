@@ -57,6 +57,7 @@ COMMAND_ALLOWLIST = {
 }
 CMD_ARG_RE = re.compile(r"^[A-Za-z0-9_]{0,16}$")
 COMMAND_TIMEOUT_SECONDS = 300
+COMMAND_PENDING_TTL_SECONDS = 1800
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required")
@@ -331,13 +332,21 @@ def check_offline_alerts() -> None:
             )
 
 def check_command_timeouts() -> None:
-    """Give up on downlink commands that were dispatched but never ACKed."""
-    cutoff = time.time() - COMMAND_TIMEOUT_SECONDS
+    """Expire downlink commands that were dispatched but never ACKed, and stale
+    pending ones that were never claimed (e.g. the gateway was offline), so an
+    old REBOOT/SET_TARGET can't fire long after the operator gave up on it."""
+    now = time.time()
+    sent_cutoff = now - COMMAND_TIMEOUT_SECONDS
+    pending_cutoff = now - COMMAND_PENDING_TTL_SECONDS
     with db_transaction() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
                 "UPDATE commands SET status='timeout' WHERE status='sent' AND sent_at < %s",
-                (cutoff,),
+                (sent_cutoff,),
+            )
+            cursor.execute(
+                "UPDATE commands SET status='expired' WHERE status='pending' AND created_at < %s",
+                (pending_cutoff,),
             )
 
 
@@ -614,8 +623,15 @@ def pending_commands():
     """Gateway-facing: claim queued commands for delivery over serial."""
     if not _authorized():
         return jsonify(status="error", message="unauthorized"), 401
+    now = time.time()
     with db_transaction() as conn:
         with conn.cursor() as cursor:
+            # Expire stale pending in the same transaction so a command that
+            # aged past its TTL between sweeps is never dispatched here.
+            cursor.execute(
+                "UPDATE commands SET status='expired' WHERE status='pending' AND created_at < %s",
+                (now - COMMAND_PENDING_TTL_SECONDS,),
+            )
             cursor.execute(
                 """WITH claimed AS (
                        SELECT cmd_id FROM commands
@@ -624,7 +640,7 @@ def pending_commands():
                    UPDATE commands SET status='sent',sent_at=%s
                    WHERE cmd_id IN (SELECT cmd_id FROM claimed)
                    RETURNING cmd_id,node,cmd,arg""",
-                (time.time(),),
+                (now,),
             )
             rows = cursor.fetchall()
     commands = [
@@ -662,7 +678,7 @@ def command_ack():
     send_discord_alert(
         f"指令已執行｜{node.upper()}",
         f"cmd_id={cmd_id} 結果={result}",
-        0x39FF14 if result.startswith("OK") else 0xFF003C,
+        0xFF003C if result.startswith("ERR") else 0x39FF14,  # PONG/OK* 皆為成功,ERR* 才紅
     )
     return jsonify(status="success"), 200
 

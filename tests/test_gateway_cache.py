@@ -13,6 +13,39 @@ class Response:
         return self._json_data
 
 
+def test_dead_letter_rows_do_not_evict_live_pending(tmp_path, monkeypatch):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database))
+    monkeypatch.setattr(gateway_cache, "_max_rows", 3)
+    monkeypatch.setattr(gateway_cache, "_max_dead_letter", 100)
+
+    # Two poison rows quarantined with NEWER timestamps than the live ones.
+    for number in (1, 2):
+        gateway_cache.save_to_local_cache(
+            "s05", {"data": {"t": number}, "meta": {}},
+            event_id=f"dead-{number}", recorded_at=1000.0 + number,
+        )
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE cache SET dead_letter=1")
+
+    # Fill live pending exactly to the cap with OLDER timestamps.
+    for number in range(3):
+        gateway_cache.save_to_local_cache(
+            "s05", {"data": {"t": number}, "meta": {}},
+            event_id=f"live-{number}", recorded_at=float(number),
+        )
+
+    # cache_count only counts live rows; the cap was not spent on dead letters.
+    assert gateway_cache.cache_count() == 3
+    assert gateway_cache.dead_letter_count() == 2
+    with sqlite3.connect(database) as conn:
+        live_ids = {
+            row[0]
+            for row in conn.execute("SELECT event_id FROM cache WHERE dead_letter=0")
+        }
+    assert live_ids == {"live-0", "live-1", "live-2"}
+
+
 def test_network_failure_is_cached_with_stable_identity(tmp_path, monkeypatch):
     database = tmp_path / "cache.db"
     gateway_cache.configure("https://backend.invalid/update", str(database), "secret")

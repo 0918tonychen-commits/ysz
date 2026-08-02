@@ -78,18 +78,23 @@ async function openChart(id){activeNode=id;chartTitle.textContent=id.toUpperCase
 async function poll(){try{const response=await fetch("/api/all_data",{cache:"no-store"});if(!response.ok)throw new Error(`HTTP ${response.status}`);renderCards(await response.json());errorBox.style.display="none";retryDelay=2000;pollTimer=setTimeout(poll,3000);}catch(error){showError(error.message);pollTimer=setTimeout(poll,retryDelay);retryDelay=Math.min(retryDelay*2,30000);}}
 function historyToSheet(history){const keys=Object.keys(history).filter(key=>key!=="labels"),rows=[["Time",...keys.map(key=>key.toUpperCase())]];(history.labels||[]).forEach((label,index)=>rows.push([label,...keys.map(key=>{const value=history[key]?.[index];return value===null||value===undefined?null:Number(value);})]));return XLSX.utils.aoa_to_sheet(rows);}
 const cmdName=document.getElementById("cmd-name"),cmdArg=document.getElementById("cmd-arg"),cmdStatus=document.getElementById("cmd-status"),cmdLog=document.getElementById("cmd-log");
+let cmdPollTimer=null;
 function apiKey(){let key=localStorage.getItem("lora_api_key");if(!key){key=prompt("輸入 API Key(用於下行指令,只會存在這台瀏覽器)")||"";if(key)localStorage.setItem("lora_api_key",key);}return key;}
 function fmtCmdTime(epoch){return Number.isFinite(epoch)?new Date(epoch*1000).toLocaleTimeString("zh-TW",{hour12:false}):"--";}
+function stopCommandPolling(){if(cmdPollTimer){clearTimeout(cmdPollTimer);cmdPollTimer=null;}}
 async function loadCommandLog(){
+  stopCommandPolling();
   if(!activeNode)return;
   try{
     const response=await fetch(`/api/commands?node=${encodeURIComponent(activeNode)}`);
     if(!response.ok)throw new Error(`HTTP ${response.status}`);
     const {commands}=await response.json();
     cmdLog.replaceChildren();
+    let anyUnresolved=false;
     for(const c of commands||[]){
+      if(c.status==="pending"||c.status==="sent")anyUnresolved=true;
       const tr=document.createElement("tr");
-      const resultClass=c.result==null?"":c.result.startsWith("OK")?"result-OK":"result-ERR";
+      const resultClass=c.result==null?"":c.result.startsWith("ERR")?"result-ERR":"result-OK";
       [fmtCmdTime(c.created_at),c.cmd+(c.arg?` ${c.arg}`:""),c.status,c.result??"--"].forEach((text,index)=>{
         const td=element("td","",text);
         if(index===3&&resultClass)td.className=resultClass;
@@ -97,6 +102,9 @@ async function loadCommandLog(){
       });
       cmdLog.append(tr);
     }
+    // Keep refreshing while a command is still in flight, so its ACK/timeout
+    // shows up on its own; stop once everything has settled.
+    if(anyUnresolved&&activeNode)cmdPollTimer=setTimeout(loadCommandLog,3000);
   }catch(error){cmdStatus.textContent=`指令紀錄讀取失敗：${error.message}`;}
 }
 document.getElementById("cmd-send").addEventListener("click",async()=>{
@@ -118,7 +126,7 @@ document.getElementById("cmd-send").addEventListener("click",async()=>{
   }catch(error){cmdStatus.textContent=`送出失敗：${error.message}`;}
 });
 document.getElementById("cmd-refresh").addEventListener("click",loadCommandLog);
-document.getElementById("close-chart").addEventListener("click",()=>{activeNode=null;chartPanel.style.display="none";cmdLog.replaceChildren();cmdStatus.textContent="";});
+document.getElementById("close-chart").addEventListener("click",()=>{activeNode=null;stopCommandPolling();chartPanel.style.display="none";cmdLog.replaceChildren();cmdStatus.textContent="";});
 document.getElementById("export").addEventListener("click",async()=>{if(!activeNode)return;try{const [rawResponse,hourlyResponse]=await Promise.all([fetch(`/api/history_range/${encodeURIComponent(activeNode)}?days=7`),fetch(`/api/history_hourly/${encodeURIComponent(activeNode)}?days=90`)]);if(!rawResponse.ok||!hourlyResponse.ok)throw new Error("Export request failed");const raw=await rawResponse.json(),hourly=await hourlyResponse.json(),book=XLSX.utils.book_new();XLSX.utils.book_append_sheet(book,historyToSheet(raw),"7d_raw");XLSX.utils.book_append_sheet(book,historyToSheet(hourly),"90d_hourly");XLSX.writeFile(book,`${activeNode}_DATA.xlsx`);}catch(error){showError(error.message);}});
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"){clearTimeout(pollTimer);poll();}});poll();
 </script></body></html>

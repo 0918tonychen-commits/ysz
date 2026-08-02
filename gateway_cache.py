@@ -15,6 +15,7 @@ _backend_url = ""
 _api_key = ""
 _local_db = "gateway_cache.db"
 _max_rows = 5000
+_max_dead_letter = 500
 _flush_batch = 10
 _flush_lock = threading.Lock()
 
@@ -149,15 +150,31 @@ def save_to_local_cache(
                     last_error,
                 ),
             )
-            total = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
-            if total > _max_rows:
-                lost = total - _max_rows
+            # Cap pending and quarantined rows separately: poison in the
+            # dead-letter table must never count against, or evict, telemetry
+            # that is still waiting to be delivered.
+            live = conn.execute(
+                "SELECT COUNT(*) FROM cache WHERE dead_letter=0"
+            ).fetchone()[0]
+            if live > _max_rows:
+                lost = live - _max_rows
                 conn.execute(
                     "DELETE FROM cache WHERE id IN "
-                    "(SELECT id FROM cache ORDER BY recorded_at,id LIMIT ?)",
+                    "(SELECT id FROM cache WHERE dead_letter=0 ORDER BY recorded_at,id LIMIT ?)",
                     (lost,),
                 )
-                print(f"CRITICAL: cache limit exceeded; permanently dropped {lost} oldest events")
+                print(f"CRITICAL: cache limit exceeded; permanently dropped {lost} oldest pending events")
+            dead = conn.execute(
+                "SELECT COUNT(*) FROM cache WHERE dead_letter=1"
+            ).fetchone()[0]
+            if dead > _max_dead_letter:
+                drop = dead - _max_dead_letter
+                conn.execute(
+                    "DELETE FROM cache WHERE id IN "
+                    "(SELECT id FROM cache WHERE dead_letter=1 ORDER BY recorded_at,id LIMIT ?)",
+                    (drop,),
+                )
+                print(f"WARNING: dead-letter limit exceeded; dropped {drop} oldest quarantined events")
         return True
     except sqlite3.Error as exc:
         print(f"CRITICAL: SQLite cache write failed: {exc}")

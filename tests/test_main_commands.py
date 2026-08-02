@@ -1,0 +1,249 @@
+"""Flask command-control-plane tests.
+
+`main` connects to PostgreSQL and starts a monitor thread at import time, and
+the README promises the suite needs no Neon. So we stub ``psycopg.connect``
+before importing ``main`` (init_db then only issues DDL, never fetches), and
+each test swaps ``main.db_transaction`` / ``main.db_fetch`` for an in-memory
+fake to drive the endpoint logic without a real database.
+"""
+
+import contextlib
+import os
+
+# Must be set before importing main (it validates these at import time).
+os.environ.setdefault("DATABASE_URL", "postgresql://fake/db")
+os.environ.setdefault("LORA_API_KEY", "test-key-123")
+os.environ["DISCORD_WEBHOOK_URL"] = ""  # never hit a real webhook from tests
+
+import psycopg
+
+
+class _ImportStubCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *args, **kwargs):
+        pass
+
+    def executemany(self, *args, **kwargs):
+        pass
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class _ImportStubConn:
+    closed = False
+
+    def cursor(self):
+        return _ImportStubCursor()
+
+    @contextlib.contextmanager
+    def transaction(self):
+        yield self
+
+    def close(self):
+        pass
+
+
+psycopg.connect = lambda *args, **kwargs: _ImportStubConn()
+
+import main  # noqa: E402
+
+API_KEY = "test-key-123"
+AUTH = {"X-API-Key": API_KEY}
+
+
+class FakeCursor:
+    def __init__(self, fetchone=None, fetchall=()):
+        self._fetchone = fetchone
+        self._fetchall = list(fetchall)
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query, params=()):
+        self.executed.append((query, params))
+
+    def executemany(self, query, seq):
+        self.executed.append((query, list(seq)))
+
+    def fetchone(self):
+        return self._fetchone
+
+    def fetchall(self):
+        return self._fetchall
+
+
+class FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+
+def fake_transaction(cursor):
+    @contextlib.contextmanager
+    def _tx():
+        yield FakeConn(cursor)
+
+    return _tx
+
+
+def sql_of(cursor):
+    return " ".join(query for query, _ in cursor.executed)
+
+
+# --- auth + input validation (these return before any DB access) ------------
+
+def test_create_command_requires_auth():
+    with main.app.test_client() as client:
+        response = client.post("/api/commands", json={"node": "s03", "cmd": "PING"})
+    assert response.status_code == 401
+
+
+def test_create_command_rejects_bad_node():
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands", json={"node": "bad", "cmd": "PING"}, headers=AUTH
+        )
+    assert response.status_code == 400
+    assert response.get_json()["message"] == "invalid node"
+
+
+def test_create_command_rejects_cmd_outside_allowlist():
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands", json={"node": "s03", "cmd": "DROP_TABLE"}, headers=AUTH
+        )
+    assert response.status_code == 400
+    assert response.get_json()["message"] == "invalid cmd"
+
+
+def test_create_command_rejects_arg_with_separators():
+    # A comma/space in arg would corrupt the comma-delimited LoRa command frame.
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands",
+            json={"node": "s03", "cmd": "SET_TARGET", "arg": "s05,evil"},
+            headers=AUTH,
+        )
+    assert response.status_code == 400
+    assert response.get_json()["message"] == "invalid arg"
+
+
+# --- happy paths driven through the fake DB ---------------------------------
+
+def test_create_command_returns_cmd_id(monkeypatch):
+    cursor = FakeCursor()
+    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands",
+            json={"node": "s03", "cmd": "SET_TARGET", "arg": "s05"},
+            headers=AUTH,
+        )
+    assert response.status_code == 201
+    assert response.get_json()["cmd_id"].startswith("C")
+
+
+def test_pending_commands_expires_stale_then_claims(monkeypatch):
+    cursor = FakeCursor(fetchall=[("C1", "s03", "PING", "")])
+    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
+    with main.app.test_client() as client:
+        response = client.get("/api/commands/pending", headers=AUTH)
+    assert response.status_code == 200
+    assert response.get_json()["commands"] == [
+        {"cmd_id": "C1", "node": "s03", "cmd": "PING", "arg": ""}
+    ]
+    # defense-in-depth: the claim endpoint expires stale pending in the same txn
+    assert "status='expired'" in sql_of(cursor)
+
+
+def test_pending_commands_requires_auth():
+    with main.app.test_client() as client:
+        response = client.get("/api/commands/pending")
+    assert response.status_code == 401
+
+
+def test_command_ack_unknown_returns_404(monkeypatch):
+    cursor = FakeCursor(fetchone=None)  # UPDATE ... RETURNING matched no row
+    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/ack",
+            json={"node": "s03", "cmd_id": "Cdead", "result": "OK"},
+            headers=AUTH,
+        )
+    assert response.status_code == 404
+
+
+def test_command_ack_known_returns_success(monkeypatch):
+    cursor = FakeCursor(fetchone=("Cabc",))
+    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
+    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: None)
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/ack",
+            json={"node": "s03", "cmd_id": "Cabc", "result": "OK"},
+            headers=AUTH,
+        )
+    assert response.status_code == 200
+
+
+def test_command_ack_rejects_bad_node(monkeypatch):
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/ack",
+            json={"node": "nope", "cmd_id": "Cabc", "result": "OK"},
+            headers=AUTH,
+        )
+    assert response.status_code == 400
+
+
+def test_command_status_unknown_returns_404(monkeypatch):
+    monkeypatch.setattr(main, "db_fetch", lambda *a, **k: [])
+    with main.app.test_client() as client:
+        response = client.get("/api/commands/Cnope")
+    assert response.status_code == 404
+
+
+def test_list_commands_by_node_maps_rows(monkeypatch):
+    row = ("C1", "s03", "PING", "", "acked", "PONG", 1.0, 2.0, 3.0)
+    monkeypatch.setattr(main, "db_fetch", lambda *a, **k: [row])
+    with main.app.test_client() as client:
+        response = client.get("/api/commands?node=s03")
+    assert response.status_code == 200
+    body = response.get_json()["commands"][0]
+    assert body["cmd_id"] == "C1"
+    assert body["status"] == "acked"
+    assert body["result"] == "PONG"
+
+
+def test_list_commands_rejects_bad_node():
+    with main.app.test_client() as client:
+        response = client.get("/api/commands?node=bad")
+    assert response.status_code == 200
+    assert response.get_json()["commands"] == []
+
+
+# --- the new pending-TTL sweep ----------------------------------------------
+
+def test_check_command_timeouts_expires_sent_and_pending(monkeypatch):
+    cursor = FakeCursor()
+    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
+    main.check_command_timeouts()
+    sql = sql_of(cursor)
+    assert "status='timeout'" in sql and "status='sent'" in sql
+    assert "status='expired'" in sql and "status='pending'" in sql

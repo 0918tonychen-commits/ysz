@@ -16,7 +16,7 @@ from lora_payload import MCountTracker, parse_ack_line, parse_payload
 
 load_dotenv()
 
-COM_PORT = os.environ.get("LORA_COM_PORT", "COM6")
+COM_PORT = os.environ.get("LORA_COM_PORT", "COM3")
 BAUD_RATE = int(os.environ.get("LORA_BAUD_RATE", "115200"))
 BACKEND_URL = os.environ.get("BACKEND_URL", "https://ysz.onrender.com/update")
 LOCAL_DB = os.environ.get("GATEWAY_CACHE_DB", "gateway_cache.db")
