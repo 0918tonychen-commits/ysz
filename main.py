@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hmac
@@ -12,7 +13,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
@@ -64,6 +65,8 @@ if not DATABASE_URL:
 if not API_KEY:
     print("WARNING: LORA_API_KEY is unset; protected endpoints reject all requests")
 
+T = TypeVar("T")
+
 _db_lock = threading.RLock()
 _db_conn: psycopg.Connection[Any] | None = None
 _alert_lock = threading.Lock()
@@ -86,96 +89,128 @@ def db_transaction():
             yield conn
 
 
-def db_fetch(query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+def _discard_connection() -> None:
     global _db_conn
+    with _db_lock:
+        if _db_conn and not _db_conn.closed:
+            _db_conn.close()
+        _db_conn = None
+
+
+def db_run(operation: Callable[[psycopg.Cursor[Any]], T]) -> T:
+    """Run ``operation`` in a transaction, retrying once on a dropped connection.
+
+    Neon hangs up on idle connections, so the first statement after a quiet
+    period can fail even though the database is healthy. A failed transaction
+    committed nothing, so replaying it on a fresh connection is safe.
+    """
     for attempt in range(2):
         try:
             with db_transaction() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query, params)
-                    return cursor.fetchall()
+                    return operation(cursor)
         except psycopg.OperationalError:
-            with _db_lock:
-                if _db_conn and not _db_conn.closed:
-                    _db_conn.close()
-                _db_conn = None
+            _discard_connection()
             if attempt:
                 raise
-    return []
+    raise AssertionError("unreachable")
+
+
+def db_fetch(query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    def fetch(cursor: psycopg.Cursor[Any]) -> list[tuple[Any, ...]]:
+        cursor.execute(query, params)
+        return cursor.fetchall()
+
+    return db_run(fetch)
+
+
+def db_execute(query: str, params: tuple[Any, ...] = ()) -> None:
+    db_run(lambda cursor: cursor.execute(query, params))
+
+
+def db_claim(query: str, params: tuple[Any, ...] = ()) -> bool:
+    """Run an ``... RETURNING`` statement; True when it matched a row."""
+
+    def claim(cursor: psycopg.Cursor[Any]) -> bool:
+        cursor.execute(query, params)
+        return cursor.fetchone() is not None
+
+    return db_run(claim)
 
 
 def init_db() -> None:
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """CREATE TABLE IF NOT EXISTS telemetry_events (
-                    event_id TEXT PRIMARY KEY,
-                    node_id TEXT NOT NULL,
-                    recorded_at DOUBLE PRECISION NOT NULL,
-                    received_at DOUBLE PRECISION NOT NULL,
-                    data JSONB NOT NULL,
-                    meta JSONB NOT NULL
-                )"""
-            )
-            cursor.execute(
-                """CREATE TABLE IF NOT EXISTS readings (
-                    id BIGSERIAL PRIMARY KEY,
-                    event_id TEXT,
-                    node_id TEXT NOT NULL,
-                    sensor TEXT NOT NULL,
-                    value DOUBLE PRECISION NOT NULL,
-                    recorded_at DOUBLE PRECISION NOT NULL
-                )"""
-            )
-            cursor.execute("ALTER TABLE readings ADD COLUMN IF NOT EXISTS event_id TEXT")
-            cursor.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_event_sensor "
-                "ON readings(event_id,sensor) WHERE event_id IS NOT NULL"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_node_time "
-                "ON telemetry_events(node_id,recorded_at)"
-            )
-            cursor.execute(
-                """CREATE TABLE IF NOT EXISTS readings_hourly (
-                    node_id TEXT NOT NULL,
-                    sensor TEXT NOT NULL,
-                    bucket_ts DOUBLE PRECISION NOT NULL,
-                    sum_value DOUBLE PRECISION NOT NULL,
-                    min_value DOUBLE PRECISION NOT NULL,
-                    max_value DOUBLE PRECISION NOT NULL,
-                    sample_count BIGINT NOT NULL,
-                    PRIMARY KEY(node_id,sensor,bucket_ts)
-                )"""
-            )
-            cursor.execute(
-                """CREATE TABLE IF NOT EXISTS alert_state (
-                    alert_key TEXT PRIMARY KEY,
-                    state TEXT NOT NULL,
-                    last_sent DOUBLE PRECISION NOT NULL
-                )"""
-            )
-            cursor.execute(
-                """CREATE TABLE IF NOT EXISTS commands (
-                    cmd_id TEXT PRIMARY KEY,
-                    node TEXT NOT NULL,
-                    cmd TEXT NOT NULL,
-                    arg TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    result TEXT,
-                    created_at DOUBLE PRECISION NOT NULL,
-                    sent_at DOUBLE PRECISION,
-                    acked_at DOUBLE PRECISION
-                )"""
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_commands_status "
-                "ON commands(status,created_at)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_commands_node "
-                "ON commands(node,created_at)"
-            )
+    def create(cursor: psycopg.Cursor[Any]) -> None:
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS telemetry_events (
+                event_id TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL,
+                recorded_at DOUBLE PRECISION NOT NULL,
+                received_at DOUBLE PRECISION NOT NULL,
+                data JSONB NOT NULL,
+                meta JSONB NOT NULL
+            )"""
+        )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS readings (
+                id BIGSERIAL PRIMARY KEY,
+                event_id TEXT,
+                node_id TEXT NOT NULL,
+                sensor TEXT NOT NULL,
+                value DOUBLE PRECISION NOT NULL,
+                recorded_at DOUBLE PRECISION NOT NULL
+            )"""
+        )
+        cursor.execute("ALTER TABLE readings ADD COLUMN IF NOT EXISTS event_id TEXT")
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_event_sensor "
+            "ON readings(event_id,sensor) WHERE event_id IS NOT NULL"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_node_time "
+            "ON telemetry_events(node_id,recorded_at)"
+        )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS readings_hourly (
+                node_id TEXT NOT NULL,
+                sensor TEXT NOT NULL,
+                bucket_ts DOUBLE PRECISION NOT NULL,
+                sum_value DOUBLE PRECISION NOT NULL,
+                min_value DOUBLE PRECISION NOT NULL,
+                max_value DOUBLE PRECISION NOT NULL,
+                sample_count BIGINT NOT NULL,
+                PRIMARY KEY(node_id,sensor,bucket_ts)
+            )"""
+        )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS alert_state (
+                alert_key TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                last_sent DOUBLE PRECISION NOT NULL
+            )"""
+        )
+        cursor.execute(
+            """CREATE TABLE IF NOT EXISTS commands (
+                cmd_id TEXT PRIMARY KEY,
+                node TEXT NOT NULL,
+                cmd TEXT NOT NULL,
+                arg TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                result TEXT,
+                created_at DOUBLE PRECISION NOT NULL,
+                sent_at DOUBLE PRECISION,
+                acked_at DOUBLE PRECISION
+            )"""
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_commands_status "
+            "ON commands(status,created_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_commands_node "
+            "ON commands(node,created_at)"
+        )
+
+    db_run(create)
 
 
 def _authorized() -> bool:
@@ -282,17 +317,14 @@ def check_threshold_alerts(node: str, data: dict[str, float]) -> None:
         if sensor not in data or data[sensor] <= rule["max"]:
             continue
         key = f"threshold:{node}:{sensor}"
-        with db_transaction() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """INSERT INTO alert_state(alert_key,state,last_sent)
-                       VALUES (%s,'active',%s)
-                       ON CONFLICT(alert_key) DO UPDATE SET last_sent=EXCLUDED.last_sent
-                       WHERE alert_state.last_sent < %s
-                       RETURNING alert_key""",
-                    (key, now, now - ALERT_COOLDOWN),
-                )
-                claimed = cursor.fetchone() is not None
+        claimed = db_claim(
+            """INSERT INTO alert_state(alert_key,state,last_sent)
+               VALUES (%s,'active',%s)
+               ON CONFLICT(alert_key) DO UPDATE SET last_sent=EXCLUDED.last_sent
+               WHERE alert_state.last_sent < %s
+               RETURNING alert_key""",
+            (key, now, now - ALERT_COOLDOWN),
+        )
         if claimed:
             send_discord_alert(
                 f"數值超標｜{node.upper()}",
@@ -312,18 +344,15 @@ def check_offline_alerts() -> None:
     for node, _data, _meta, _recorded, received in _latest_rows():
         if now - received <= OFFLINE_TIMEOUT:
             continue
-        with db_transaction() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """INSERT INTO alert_state(alert_key,state,last_sent)
-                       VALUES (%s,'offline',%s)
-                       ON CONFLICT(alert_key) DO UPDATE
-                       SET state='offline',last_sent=EXCLUDED.last_sent
-                       WHERE alert_state.state <> 'offline'
-                       RETURNING alert_key""",
-                    (f"offline:{node}", now),
-                )
-                claimed = cursor.fetchone() is not None
+        claimed = db_claim(
+            """INSERT INTO alert_state(alert_key,state,last_sent)
+               VALUES (%s,'offline',%s)
+               ON CONFLICT(alert_key) DO UPDATE
+               SET state='offline',last_sent=EXCLUDED.last_sent
+               WHERE alert_state.state <> 'offline'
+               RETURNING alert_key""",
+            (f"offline:{node}", now),
+        )
         if claimed:
             send_discord_alert(
                 f"節點離線｜{node.upper()}",
@@ -338,16 +367,18 @@ def check_command_timeouts() -> None:
     now = time.time()
     sent_cutoff = now - COMMAND_TIMEOUT_SECONDS
     pending_cutoff = now - COMMAND_PENDING_TTL_SECONDS
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "UPDATE commands SET status='timeout' WHERE status='sent' AND sent_at < %s",
-                (sent_cutoff,),
-            )
-            cursor.execute(
-                "UPDATE commands SET status='expired' WHERE status='pending' AND created_at < %s",
-                (pending_cutoff,),
-            )
+
+    def sweep(cursor: psycopg.Cursor[Any]) -> None:
+        cursor.execute(
+            "UPDATE commands SET status='timeout' WHERE status='sent' AND sent_at < %s",
+            (sent_cutoff,),
+        )
+        cursor.execute(
+            "UPDATE commands SET status='expired' WHERE status='pending' AND created_at < %s",
+            (pending_cutoff,),
+        )
+
+    db_run(sweep)
 
 
 _last_maintenance = 0.0
@@ -361,32 +392,33 @@ def database_maintenance() -> None:
         return
     raw_cutoff = now - RETENTION_SECONDS
     hourly_cutoff = now - HOURLY_RETENTION_SECONDS
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """WITH expired AS (
-                       DELETE FROM readings WHERE recorded_at < %s
-                       RETURNING node_id,sensor,value,recorded_at
-                   )
-                   INSERT INTO readings_hourly
-                       (node_id,sensor,bucket_ts,sum_value,min_value,max_value,sample_count)
-                   SELECT node_id,sensor,FLOOR(recorded_at/3600)*3600,
-                          SUM(value),MIN(value),MAX(value),COUNT(*)
-                   FROM expired
-                   GROUP BY node_id,sensor,FLOOR(recorded_at/3600)*3600
-                   ON CONFLICT(node_id,sensor,bucket_ts) DO UPDATE SET
-                       sum_value=readings_hourly.sum_value+EXCLUDED.sum_value,
-                       min_value=LEAST(readings_hourly.min_value,EXCLUDED.min_value),
-                       max_value=GREATEST(readings_hourly.max_value,EXCLUDED.max_value),
-                       sample_count=readings_hourly.sample_count+EXCLUDED.sample_count""",
-                (raw_cutoff,),
-            )
-            cursor.execute(
-                "DELETE FROM telemetry_events WHERE recorded_at < %s", (raw_cutoff,)
-            )
-            cursor.execute(
-                "DELETE FROM readings_hourly WHERE bucket_ts < %s", (hourly_cutoff,)
-            )
+    def maintain(cursor: psycopg.Cursor[Any]) -> None:
+        cursor.execute(
+            """WITH expired AS (
+                   DELETE FROM readings WHERE recorded_at < %s
+                   RETURNING node_id,sensor,value,recorded_at
+               )
+               INSERT INTO readings_hourly
+                   (node_id,sensor,bucket_ts,sum_value,min_value,max_value,sample_count)
+               SELECT node_id,sensor,FLOOR(recorded_at/3600)*3600,
+                      SUM(value),MIN(value),MAX(value),COUNT(*)
+               FROM expired
+               GROUP BY node_id,sensor,FLOOR(recorded_at/3600)*3600
+               ON CONFLICT(node_id,sensor,bucket_ts) DO UPDATE SET
+                   sum_value=readings_hourly.sum_value+EXCLUDED.sum_value,
+                   min_value=LEAST(readings_hourly.min_value,EXCLUDED.min_value),
+                   max_value=GREATEST(readings_hourly.max_value,EXCLUDED.max_value),
+                   sample_count=readings_hourly.sample_count+EXCLUDED.sample_count""",
+            (raw_cutoff,),
+        )
+        cursor.execute(
+            "DELETE FROM telemetry_events WHERE recorded_at < %s", (raw_cutoff,)
+        )
+        cursor.execute(
+            "DELETE FROM readings_hourly WHERE bucket_ts < %s", (hourly_cutoff,)
+        )
+
+    db_run(maintain)
     _last_maintenance = now
 
 
@@ -424,56 +456,55 @@ def update():
         return jsonify(status="error", message=error), 400
     assert payload is not None
     now = time.time()
-    inserted = False
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """INSERT INTO telemetry_events
-                   (event_id,node_id,recorded_at,received_at,data,meta)
-                   VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(event_id) DO NOTHING
-                   RETURNING event_id""",
-                (
-                    payload["event_id"],
-                    payload["node"],
-                    payload["recorded_at"],
-                    now,
-                    Jsonb(payload["data"]),
-                    Jsonb(payload["meta"]),
-                ),
+
+    def store(cursor: psycopg.Cursor[Any]) -> bool:
+        cursor.execute(
+            """INSERT INTO telemetry_events
+               (event_id,node_id,recorded_at,received_at,data,meta)
+               VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(event_id) DO NOTHING
+               RETURNING event_id""",
+            (
+                payload["event_id"],
+                payload["node"],
+                payload["recorded_at"],
+                now,
+                Jsonb(payload["data"]),
+                Jsonb(payload["meta"]),
+            ),
+        )
+        is_new = cursor.fetchone() is not None
+        if is_new:
+            cursor.executemany(
+                """INSERT INTO readings
+                   (event_id,node_id,sensor,value,recorded_at)
+                   VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                [
+                    (
+                        payload["event_id"],
+                        payload["node"],
+                        key,
+                        value,
+                        payload["recorded_at"],
+                    )
+                    for key, value in payload["data"].items()
+                ],
             )
-            inserted = cursor.fetchone() is not None
-            if inserted:
-                cursor.executemany(
-                    """INSERT INTO readings
-                       (event_id,node_id,sensor,value,recorded_at)
-                       VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
-                    [
-                        (
-                            payload["event_id"],
-                            payload["node"],
-                            key,
-                            value,
-                            payload["recorded_at"],
-                        )
-                        for key, value in payload["data"].items()
-                    ],
-                )
-            else:
-                # A retry after a lost HTTP response is not a new reading, but it
-                # proves the node/gateway path is alive now.
-                cursor.execute(
-                    """UPDATE telemetry_events SET received_at=GREATEST(received_at,%s)
-                       WHERE event_id=%s""",
-                    (now, payload["event_id"]),
-                )
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
+        else:
+            # A retry after a lost HTTP response is not a new reading, but it
+            # proves the node/gateway path is alive now.
             cursor.execute(
-                """UPDATE alert_state SET state='online',last_sent=%s
-                   WHERE alert_key=%s AND state='offline' RETURNING alert_key""",
-                (now, f"offline:{payload['node']}"),
+                """UPDATE telemetry_events SET received_at=GREATEST(received_at,%s)
+                   WHERE event_id=%s""",
+                (now, payload["event_id"]),
             )
-            was_offline = cursor.fetchone() is not None
+        return is_new
+
+    inserted = db_run(store)
+    was_offline = db_claim(
+        """UPDATE alert_state SET state='online',last_sent=%s
+           WHERE alert_key=%s AND state='offline' RETURNING alert_key""",
+        (now, f"offline:{payload['node']}"),
+    )
     if was_offline:
         send_discord_alert(
             f"節點恢復連線｜{payload['node'].upper()}",
@@ -608,13 +639,11 @@ def create_command():
     if not isinstance(arg, str) or not CMD_ARG_RE.fullmatch(arg):
         return jsonify(status="error", message="invalid arg"), 400
     cmd_id = "C" + secrets.token_hex(4)
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """INSERT INTO commands(cmd_id,node,cmd,arg,status,created_at)
-                   VALUES (%s,%s,%s,%s,'pending',%s)""",
-                (cmd_id, node, cmd, arg, time.time()),
-            )
+    db_execute(
+        """INSERT INTO commands(cmd_id,node,cmd,arg,status,created_at)
+           VALUES (%s,%s,%s,%s,'pending',%s)""",
+        (cmd_id, node, cmd, arg, time.time()),
+    )
     return jsonify(status="success", cmd_id=cmd_id), 201
 
 
@@ -624,25 +653,27 @@ def pending_commands():
     if not _authorized():
         return jsonify(status="error", message="unauthorized"), 401
     now = time.time()
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
-            # Expire stale pending in the same transaction so a command that
-            # aged past its TTL between sweeps is never dispatched here.
-            cursor.execute(
-                "UPDATE commands SET status='expired' WHERE status='pending' AND created_at < %s",
-                (now - COMMAND_PENDING_TTL_SECONDS,),
-            )
-            cursor.execute(
-                """WITH claimed AS (
-                       SELECT cmd_id FROM commands
-                       WHERE status='pending' ORDER BY created_at LIMIT 10
-                   )
-                   UPDATE commands SET status='sent',sent_at=%s
-                   WHERE cmd_id IN (SELECT cmd_id FROM claimed)
-                   RETURNING cmd_id,node,cmd,arg""",
-                (now,),
-            )
-            rows = cursor.fetchall()
+
+    def claim(cursor: psycopg.Cursor[Any]) -> list[tuple[Any, ...]]:
+        # Expire stale pending in the same transaction so a command that
+        # aged past its TTL between sweeps is never dispatched here.
+        cursor.execute(
+            "UPDATE commands SET status='expired' WHERE status='pending' AND created_at < %s",
+            (now - COMMAND_PENDING_TTL_SECONDS,),
+        )
+        cursor.execute(
+            """WITH claimed AS (
+                   SELECT cmd_id FROM commands
+                   WHERE status='pending' ORDER BY created_at LIMIT 10
+               )
+               UPDATE commands SET status='sent',sent_at=%s
+               WHERE cmd_id IN (SELECT cmd_id FROM claimed)
+               RETURNING cmd_id,node,cmd,arg""",
+            (now,),
+        )
+        return cursor.fetchall()
+
+    rows = db_run(claim)
     commands = [
         {"cmd_id": cmd_id, "node": node, "cmd": cmd, "arg": arg}
         for cmd_id, node, cmd, arg in rows
@@ -665,14 +696,11 @@ def command_ack():
         return jsonify(status="error", message="invalid node"), 400
     if not isinstance(result, str) or not result or len(result) > 64:
         return jsonify(status="error", message="invalid result"), 400
-    with db_transaction() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """UPDATE commands SET status='acked',result=%s,acked_at=%s
-                   WHERE cmd_id=%s RETURNING cmd_id""",
-                (result, time.time(), cmd_id),
-            )
-            updated = cursor.fetchone() is not None
+    updated = db_claim(
+        """UPDATE commands SET status='acked',result=%s,acked_at=%s
+           WHERE cmd_id=%s RETURNING cmd_id""",
+        (result, time.time(), cmd_id),
+    )
     if not updated:
         return jsonify(status="error", message="unknown cmd_id"), 404
     send_discord_alert(

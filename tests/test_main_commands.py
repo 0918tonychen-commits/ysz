@@ -16,6 +16,7 @@ os.environ.setdefault("LORA_API_KEY", "test-key-123")
 os.environ["DISCORD_WEBHOOK_URL"] = ""  # never hit a real webhook from tests
 
 import psycopg
+import pytest
 
 
 class _ImportStubCursor:
@@ -247,3 +248,53 @@ def test_check_command_timeouts_expires_sent_and_pending(monkeypatch):
     sql = sql_of(cursor)
     assert "status='timeout'" in sql and "status='sent'" in sql
     assert "status='expired'" in sql and "status='pending'" in sql
+
+
+# --- write-path reconnect (Neon drops idle connections) ---------------------
+
+def _flaky_transaction(cursor, failures):
+    """A db_transaction whose first ``failures`` uses raise OperationalError."""
+    remaining = {"count": failures}
+
+    @contextlib.contextmanager
+    def _tx():
+        if remaining["count"]:
+            remaining["count"] -= 1
+            raise psycopg.OperationalError("connection closed by server")
+        yield FakeConn(cursor)
+
+    return _tx
+
+
+def test_write_retries_once_after_dropped_connection(monkeypatch):
+    cursor = FakeCursor(fetchone=("Cabc",))
+    monkeypatch.setattr(main, "db_transaction", _flaky_transaction(cursor, 1))
+    monkeypatch.setattr(main, "_discard_connection", lambda: None)
+    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: None)
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/ack",
+            json={"node": "s03", "cmd_id": "Cabc", "result": "OK"},
+            headers=AUTH,
+        )
+    # Previously the first statement after an idle period surfaced as a 500.
+    assert response.status_code == 200
+    assert len(cursor.executed) == 1  # the retry ran the statement exactly once
+
+
+def test_write_gives_up_after_second_failure(monkeypatch):
+    cursor = FakeCursor()
+    monkeypatch.setattr(main, "db_transaction", _flaky_transaction(cursor, 2))
+    monkeypatch.setattr(main, "_discard_connection", lambda: None)
+    with pytest.raises(psycopg.OperationalError):
+        main.db_execute("UPDATE commands SET status='x'")
+    assert cursor.executed == []
+
+
+def test_failed_transaction_discards_the_connection(monkeypatch):
+    cursor = FakeCursor()
+    discarded = []
+    monkeypatch.setattr(main, "db_transaction", _flaky_transaction(cursor, 1))
+    monkeypatch.setattr(main, "_discard_connection", lambda: discarded.append(True))
+    main.db_execute("UPDATE commands SET status='x'")
+    assert discarded == [True]
