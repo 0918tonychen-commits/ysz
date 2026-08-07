@@ -24,6 +24,8 @@ API_KEY = os.environ.get("LORA_API_KEY", "")
 QUEUE_SIZE = int(os.environ.get("UPLOAD_QUEUE_SIZE", "256"))
 MAX_SERIAL_LINE = 8192
 COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
+CACHE_FLUSH_INTERVAL = float(os.environ.get("CACHE_FLUSH_INTERVAL_SECONDS", "30"))
+DROP_REPORT_INTERVAL = float(os.environ.get("DROP_REPORT_INTERVAL_SECONDS", "300"))
 
 
 class SerialWriter:
@@ -49,6 +51,10 @@ class Gateway:
         self.tracker = MCountTracker()
         self.serial_port: serial.Serial | None = None
         self.serial_writer: SerialWriter | None = None
+        # Dropped packets used to vanish without a trace, which hid exactly the
+        # restart behaviour we need to see. Count them and report periodically.
+        self.dropped: dict[str, int] = {}
+        self._last_drop_report = 0.0
 
     def enqueue(self, node: str, payload: dict[str, Any], recorded_at: float) -> None:
         try:
@@ -95,9 +101,55 @@ class Gateway:
         raw = line.split("數據:", 1)[1].strip()
         node, payload, status = parse_payload(raw, self.tracker)
         if status == "valid" and node and payload:
+            if payload["meta"].get("rebooted"):
+                print(
+                    f"NODE RESTART: {node} boot_id={payload['meta'].get('boot_id')} "
+                    f"mcount={payload['meta'].get('mcount')}"
+                )
             self.enqueue(node, payload, time.time())
-        elif status not in {"duplicate", "out_of_order"}:
-            print(f"WARNING: ignored LoRa payload ({status}): {raw[:200]}")
+            return
+        if status in {"duplicate", "out_of_order"}:
+            self._record_drop(node, status, raw)
+            return
+        print(f"WARNING: ignored LoRa payload ({status}): {raw[:200]}")
+
+    def _record_drop(self, node: str | None, status: str, raw: str) -> None:
+        """Tally a discarded packet and summarise it on a slow cadence.
+
+        An out-of-order burst is usually a node that restarted without sending a
+        boot_id, so the first one is printed in full: that sample is the whole
+        reason the drop is worth knowing about.
+        """
+        key = f"{node or '?'}/{status}"
+        first = key not in self.dropped
+        self.dropped[key] = self.dropped.get(key, 0) + 1
+        if first:
+            print(f"WARNING: dropped LoRa payload ({status}) from {node}: {raw[:200]}")
+        now = time.monotonic()
+        if now - self._last_drop_report < DROP_REPORT_INTERVAL:
+            return
+        self._last_drop_report = now
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(self.dropped.items()))
+        print(f"WARNING: dropped packets so far: {summary}")
+
+    def _cache_flusher(self) -> None:
+        """Drain the SQLite backlog even while no packets are arriving.
+
+        ``upload_telemetry`` only flushes as a side effect of a new uplink, so a
+        backlog built up while the backend was down would otherwise sit there
+        until the next packet — which may never come if the nodes went quiet too.
+        """
+        while not self.stop_event.is_set():
+            self.stop_event.wait(CACHE_FLUSH_INTERVAL)
+            if self.stop_event.is_set():
+                return
+            try:
+                sent = gateway_cache.flush_local_cache()
+            except Exception as exc:
+                print(f"WARNING: idle cache flush failed: {exc}")
+                continue
+            if sent:
+                print(f"Flushed {sent} cached events from the backlog")
 
     def _command_poller(self) -> None:
         while not self.stop_event.is_set():
@@ -138,6 +190,10 @@ class Gateway:
             print("WARNING: LORA_API_KEY is empty; protected backend uploads will fail")
         uploader = threading.Thread(target=self._uploader, name="uploader", daemon=False)
         uploader.start()
+        flusher = threading.Thread(
+            target=self._cache_flusher, name="cache-flusher", daemon=True
+        )
+        flusher.start()
         try:
             self.serial_port = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.25)
             self.serial_writer = SerialWriter(self.serial_port)

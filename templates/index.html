@@ -3,8 +3,14 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>LoRa 環境監測系統</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <!-- Pinned + SRI: a floating "latest" tag lets an upstream release break the
+       dashboard, and an unverified CDN script would run with full page trust. -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
+          integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+          crossorigin="anonymous"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
+          integrity="sha384-EnyY0/GSHQGSxSgMwaIPzSESbqoOLSexfnSMN2AP+39Ckmn92stwABZynq1JyzdT"
+          crossorigin="anonymous"></script>
   <style>
     :root{--bg:#050914;--panel:#0f1720;--line:#243244;--text:#d1d8e0;--muted:#718096;--green:#39ff14;--red:#ff3158}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px Consolas,monospace}main{max-width:1150px;margin:auto;padding:28px 18px}
@@ -57,7 +63,10 @@
 const META_FIELDS=["rssi","snr","hop_rssi","hop_snr","mcount","loss","via","level","fallback"];
 let activeNode=null,pollTimer=null,retryDelay=2000;
 const errorBox=document.getElementById("error"),grid=document.getElementById("grid"),statusBadge=document.getElementById("system-status"),chartPanel=document.getElementById("chart-panel"),chartTitle=document.getElementById("chart-title");
-const chart=new Chart(document.getElementById("chart"),{type:"line",data:{labels:[],datasets:[]},options:{responsive:true,maintainAspectRatio:false,spanGaps:false}});
+// A blocked/failed CDN script must not take the live dashboard down with it,
+// so every use of Chart/XLSX is guarded and the rest of the page keeps working.
+const chartReady=typeof Chart==="function",xlsxReady=typeof XLSX==="object"&&XLSX!==null;
+const chart=chartReady?new Chart(document.getElementById("chart"),{type:"line",data:{labels:[],datasets:[]},options:{responsive:true,maintainAspectRatio:false,spanGaps:false}}):null;
 function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=String(text);return node;}
 function valueCell(parent,label,value){const box=element("div");box.append(element("div","label",label),element("div","value",value??"--"));parent.append(box);}
 function formatTime(epoch){return Number.isFinite(epoch)?new Date(epoch*1000).toLocaleString("zh-TW",{hour12:false}):"--";}
@@ -72,9 +81,9 @@ function renderCards(response){
   }
   const online=response.status==="online";statusBadge.className=`badge${online?" online":""}`;statusBadge.textContent=online?"SYSTEM.ONLINE":"SYSTEM.OFFLINE";
 }
-function renderChart(history){chart.data.labels=history.labels||[];chart.data.datasets=Object.keys(history).filter(key=>key!=="labels").map((key,index)=>({label:key.toUpperCase(),data:(history[key]||[]).map(value=>value===null||value===undefined?null:Number(value)),borderColor:`hsl(${(index*83)%360} 80% 60%)`,backgroundColor:`hsl(${(index*83)%360} 80% 60%)`,tension:.25}));chart.update();}
+function renderChart(history){if(!chart)return;chart.data.labels=history.labels||[];chart.data.datasets=Object.keys(history).filter(key=>key!=="labels").map((key,index)=>({label:key.toUpperCase(),data:(history[key]||[]).map(value=>value===null||value===undefined?null:Number(value)),borderColor:`hsl(${(index*83)%360} 80% 60%)`,backgroundColor:`hsl(${(index*83)%360} 80% 60%)`,tension:.25}));chart.update();}
 function showError(message){errorBox.textContent=`資料連線錯誤：${message}`;errorBox.style.display="block";statusBadge.className="badge";statusBadge.textContent="SYSTEM.ERROR";}
-async function openChart(id){activeNode=id;chartTitle.textContent=id.toUpperCase();chartPanel.style.display="block";cmdStatus.textContent="";loadCommandLog();try{const response=await fetch(`/api/history_range/${encodeURIComponent(id)}?days=7`);if(!response.ok)throw new Error(`History HTTP ${response.status}`);renderChart(await response.json());}catch(error){showError(error.message);}}
+async function openChart(id){activeNode=id;chartTitle.textContent=chartReady?id.toUpperCase():`${id.toUpperCase()}（圖表元件載入失敗,僅顯示指令面板）`;chartPanel.style.display="block";cmdStatus.textContent="";loadCommandLog();if(!chartReady)return;try{const response=await fetch(`/api/history_range/${encodeURIComponent(id)}?days=7`);if(!response.ok)throw new Error(`History HTTP ${response.status}`);renderChart(await response.json());}catch(error){showError(error.message);}}
 async function poll(){try{const response=await fetch("/api/all_data",{cache:"no-store"});if(!response.ok)throw new Error(`HTTP ${response.status}`);renderCards(await response.json());errorBox.style.display="none";retryDelay=2000;pollTimer=setTimeout(poll,3000);}catch(error){showError(error.message);pollTimer=setTimeout(poll,retryDelay);retryDelay=Math.min(retryDelay*2,30000);}}
 function historyToSheet(history){const keys=Object.keys(history).filter(key=>key!=="labels"),rows=[["Time",...keys.map(key=>key.toUpperCase())]];(history.labels||[]).forEach((label,index)=>rows.push([label,...keys.map(key=>{const value=history[key]?.[index];return value===null||value===undefined?null:Number(value);})]));return XLSX.utils.aoa_to_sheet(rows);}
 const cmdName=document.getElementById("cmd-name"),cmdArg=document.getElementById("cmd-arg"),cmdStatus=document.getElementById("cmd-status"),cmdLog=document.getElementById("cmd-log");
@@ -127,6 +136,6 @@ document.getElementById("cmd-send").addEventListener("click",async()=>{
 });
 document.getElementById("cmd-refresh").addEventListener("click",loadCommandLog);
 document.getElementById("close-chart").addEventListener("click",()=>{activeNode=null;stopCommandPolling();chartPanel.style.display="none";cmdLog.replaceChildren();cmdStatus.textContent="";});
-document.getElementById("export").addEventListener("click",async()=>{if(!activeNode)return;try{const [rawResponse,hourlyResponse]=await Promise.all([fetch(`/api/history_range/${encodeURIComponent(activeNode)}?days=7`),fetch(`/api/history_hourly/${encodeURIComponent(activeNode)}?days=90`)]);if(!rawResponse.ok||!hourlyResponse.ok)throw new Error("Export request failed");const raw=await rawResponse.json(),hourly=await hourlyResponse.json(),book=XLSX.utils.book_new();XLSX.utils.book_append_sheet(book,historyToSheet(raw),"7d_raw");XLSX.utils.book_append_sheet(book,historyToSheet(hourly),"90d_hourly");XLSX.writeFile(book,`${activeNode}_DATA.xlsx`);}catch(error){showError(error.message);}});
+document.getElementById("export").addEventListener("click",async()=>{if(!activeNode)return;if(!xlsxReady){showError("XLSX 匯出元件載入失敗,無法匯出");return;}try{const [rawResponse,hourlyResponse]=await Promise.all([fetch(`/api/history_range/${encodeURIComponent(activeNode)}?days=7`),fetch(`/api/history_hourly/${encodeURIComponent(activeNode)}?days=90`)]);if(!rawResponse.ok||!hourlyResponse.ok)throw new Error("Export request failed");const raw=await rawResponse.json(),hourly=await hourlyResponse.json(),book=XLSX.utils.book_new();XLSX.utils.book_append_sheet(book,historyToSheet(raw),"7d_raw");XLSX.utils.book_append_sheet(book,historyToSheet(hourly),"90d_hourly");XLSX.writeFile(book,`${activeNode}_DATA.xlsx`);}catch(error){showError(error.message);}});
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"){clearTimeout(pollTimer);poll();}});poll();
 </script></body></html>

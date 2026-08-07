@@ -24,6 +24,12 @@ INLINE_PAIR_RE = re.compile(
     re.IGNORECASE,
 )
 ACK_FIELD_RE = re.compile(r"(\w+)\s*=\s*([^,]+)")
+# boot_id is the one non-numeric meta field: a random value minted at every cold
+# boot, which is what separates a genuine restart from a dropped packet.
+BOOT_ID_RE = re.compile(r"^[0-9A-Fa-f]{4,32}$")
+BOOT_INLINE_RE = re.compile(
+    r"^boot(?:_id)?\s*[:=]\s*([0-9A-Fa-f]{4,32})$", re.IGNORECASE
+)
 
 META_KEYS = {
     "mcount",
@@ -39,6 +45,8 @@ META_KEYS = {
     "level",
     "fallback",
     "via",
+    "boot",
+    "boot_id",
 }
 SENSOR_ALIASES = {
     "t": "temperature",
@@ -54,6 +62,7 @@ META_ALIASES = {
     "gw_rssi": "rssi",
     "gw_snr": "snr",
     "r_in": "hop_rssi",
+    "boot": "boot_id",
 }
 NUMERIC_META_KEYS = {
     "mcount",
@@ -69,16 +78,40 @@ NUMERIC_META_KEYS = {
 
 @dataclass
 class MCountTracker:
-    """Tracks ordering and loss. A long quiet period permits a reboot-to-zero."""
+    """Tracks ordering and loss.
+
+    A node's mcount restarts at 1 on every reset, so a restart looks exactly
+    like a backwards jump. Two things rescue it: an explicit ``boot_id``, which
+    is authoritative, and — for firmware that does not send one — a long quiet
+    period followed by a near-zero counter.
+    """
 
     reboot_grace_seconds: float = 300.0
     last: dict[str, int] = field(default_factory=dict)
     last_seen: dict[str, float] = field(default_factory=dict)
     received: dict[str, int] = field(default_factory=dict)
     lost: dict[str, int] = field(default_factory=dict)
+    boot: dict[str, str] = field(default_factory=dict)
 
-    def classify(self, node: str, mcount: int, now: float | None = None) -> ParseStatus:
+    def rebooted(self, node: str, boot_id: str | None) -> bool:
+        """True when boot_id proves the node restarted since the last packet."""
+        if boot_id is None:
+            return False
+        previous = self.boot.get(node)
+        return previous is not None and previous != boot_id
+
+    def classify(
+        self,
+        node: str,
+        mcount: int,
+        now: float | None = None,
+        boot_id: str | None = None,
+    ) -> ParseStatus:
         now = time.monotonic() if now is None else now
+        # A new boot_id explains any counter jump, in either direction, with no
+        # dependence on how long the node was away.
+        if self.rebooted(node, boot_id):
+            return "valid"
         previous = self.last.get(node)
         if previous is None:
             return "valid"
@@ -91,15 +124,28 @@ class MCountTracker:
             return "out_of_order"
         return "valid"
 
-    def commit(self, node: str, mcount: int, now: float | None = None) -> float:
+    def commit(
+        self,
+        node: str,
+        mcount: int,
+        now: float | None = None,
+        boot_id: str | None = None,
+    ) -> float:
         now = time.monotonic() if now is None else now
         previous = self.last.get(node)
-        if previous is not None and mcount > previous + 1:
+        # Packets the node never sent because it was rebooting are not losses;
+        # counting them would bury the real loss rate under restart noise.
+        restarted = self.rebooted(node, boot_id) or (
+            previous is not None and mcount < previous
+        )
+        if not restarted and previous is not None and mcount > previous + 1:
             self.lost[node] = self.lost.get(node, 0) + mcount - previous - 1
         self.received[node] = self.received.get(node, 0) + 1
         self.lost.setdefault(node, 0)
         self.last[node] = mcount
         self.last_seen[node] = now
+        if boot_id is not None:
+            self.boot[node] = boot_id
         total = self.received[node] + self.lost[node]
         return round(self.lost[node] * 100.0 / total, 1) if total else 0.0
 
@@ -135,6 +181,18 @@ def parse_payload(
             route = via.lower()
             if route != node and route not in meta["via"]:
                 meta["via"].append(route)
+
+    # ``boot,A3F19C2B`` or ``boot=A3F19C2B``; the first one wins so a relay
+    # cannot overwrite the originating node's value.
+    for index, token in enumerate(tokens):
+        inline = BOOT_INLINE_RE.fullmatch(token)
+        if inline:
+            meta["boot_id"] = inline.group(1).upper()
+            break
+        if META_ALIASES.get(token.lower(), token.lower()) == "boot_id":
+            if index + 1 < len(tokens) and BOOT_ID_RE.fullmatch(tokens[index + 1]):
+                meta["boot_id"] = tokens[index + 1].upper()
+                break
 
     # Accept both ``key,value`` and ``key:value`` forms used by old firmware.
     for index, token in enumerate(tokens):
@@ -176,6 +234,9 @@ def parse_payload(
         if key in {"rssi", "snr"} or key.startswith("via_"):
             index += 1
             continue
+        if META_ALIASES.get(key, key) == "boot_id":
+            index += 2  # skip the hex value; it would pass KEY_RE as a sensor
+            continue
         if KEY_RE.fullmatch(key) and key not in META_KEYS and NUMBER_RE.fullmatch(value):
             data[SENSOR_ALIASES.get(key, key)] = float(value)
             index += 2
@@ -198,11 +259,14 @@ def parse_payload(
     if not data:
         return node, None, "incomplete"
 
+    boot_id = meta.get("boot_id")
     if tracker is not None:
-        status = tracker.classify(node, mcount)
+        status = tracker.classify(node, mcount, boot_id=boot_id)
         if status != "valid":
             return node, None, status
-        meta["loss"] = tracker.commit(node, mcount)
+        # Numeric, not bool: the backend's meta validation only accepts numbers.
+        meta["rebooted"] = 1.0 if tracker.rebooted(node, boot_id) else 0.0
+        meta["loss"] = tracker.commit(node, mcount, boot_id=boot_id)
     else:
         meta["loss"] = 0.0
 
