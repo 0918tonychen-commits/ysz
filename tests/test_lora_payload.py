@@ -33,6 +33,7 @@ def test_legacy_meta_aliases_and_hop_metrics():
         "hop_snr": 4.5,
         "level": 2.0,
         "loss": 0.0,
+        "rebooted": 0.0,
     }
 
 
@@ -118,3 +119,64 @@ def test_reboot_zero_after_grace_period():
     tracker.commit("s10", 50, now=0)
     assert tracker.classify("s10", 0, now=5) == "out_of_order"
     assert tracker.classify("s10", 0, now=11) == "valid"
+
+
+# --- boot_id: telling a restart apart from a lost packet ---------------------
+
+def test_backwards_mcount_without_boot_id_is_still_dropped():
+    # The pre-existing rule: a restart inside the grace window is indistinguishable
+    # from a reordered packet, so it is refused.
+    tracker = MCountTracker()
+    parse_payload("s05_m40,t,25", tracker)
+    _node, payload, status = parse_payload("s05_m1,t,25", tracker)
+    assert status == "out_of_order"
+    assert payload is None
+
+
+def test_new_boot_id_rescues_a_backwards_mcount():
+    tracker = MCountTracker()
+    parse_payload("s05_m40,t,25,boot,A1B2C3D4", tracker)
+    node, payload, status = parse_payload("s05_m1,t,25,boot,99887766", tracker)
+    assert (node, status) == ("s05", "valid")
+    assert payload["meta"]["boot_id"] == "99887766"
+    assert payload["meta"]["rebooted"] == 1.0
+
+
+def test_same_boot_id_still_rejects_a_backwards_mcount():
+    tracker = MCountTracker()
+    parse_payload("s05_m40,t,25,boot,A1B2C3D4", tracker)
+    _node, _payload, status = parse_payload("s05_m1,t,25,boot,A1B2C3D4", tracker)
+    assert status == "out_of_order"
+
+
+def test_restart_is_not_counted_as_packet_loss():
+    tracker = MCountTracker()
+    for mcount in (1, 2, 3):
+        parse_payload(f"s05_m{mcount},t,25,boot,AAAA1111", tracker)
+    _node, payload, _status = parse_payload("s05_m1,t,25,boot,BBBB2222", tracker)
+    # Without the guard the 1 -> 1 restart would be charged as lost packets.
+    assert payload["meta"]["loss"] == 0.0
+    assert tracker.lost["s05"] == 0
+
+
+def test_boot_id_accepts_inline_form_and_is_not_read_as_a_sensor():
+    node, payload, status = parse_payload(
+        "s05_m7,boot=DEADBEEF,t,25.5,c,410", MCountTracker()
+    )
+    assert (node, status) == ("s05", "valid")
+    assert payload["meta"]["boot_id"] == "DEADBEEF"
+    assert payload["data"] == {"temperature": 25.5, "co2": 410.0}
+
+
+def test_voltage_alias_still_reaches_data():
+    # The brownout signal has to survive parsing to be diagnosable at all.
+    _node, payload, status = parse_payload("s05_m7,v,3.71,t,25", MCountTracker())
+    assert status == "valid"
+    assert payload["data"]["voltage"] == 3.71
+
+
+def test_first_boot_id_seen_is_not_treated_as_a_restart():
+    tracker = MCountTracker()
+    _node, payload, status = parse_payload("s05_m1,t,25,boot,A1B2C3D4", tracker)
+    assert status == "valid"
+    assert payload["meta"]["rebooted"] == 0.0

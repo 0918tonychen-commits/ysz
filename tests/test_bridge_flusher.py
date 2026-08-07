@@ -1,4 +1,5 @@
-"""The gateway's idle cache flusher.
+"""Gateway behaviours that keep telemetry and diagnostics from going missing:
+the idle cache flusher, and the reporting of packets the tracker discards.
 
 ``upload_telemetry`` only drains the SQLite backlog as a side effect of a new
 uplink, so a backlog built while the backend was down would sit there forever if
@@ -68,3 +69,40 @@ def test_flusher_stops_promptly_on_shutdown(monkeypatch):
     gateway._cache_flusher()
 
     assert calls == []
+
+
+# --- discarded packets must leave a trace ------------------------------------
+
+def test_out_of_order_packet_is_logged_not_silently_dropped(capsys):
+    gateway = bridge.Gateway()
+    gateway._handle_line("數據: s05_m40,t,25")
+    gateway._handle_line("數據: s05_m1,t,25")
+
+    out = capsys.readouterr().out
+    assert "dropped LoRa payload (out_of_order)" in out
+    assert gateway.dropped["s05/out_of_order"] == 1
+
+
+def test_repeated_drops_print_one_sample_then_only_tally(capsys):
+    gateway = bridge.Gateway()
+    gateway._handle_line("數據: s05_m40,t,25")
+    for _ in range(5):
+        gateway._handle_line("數據: s05_m1,t,25")
+
+    out = capsys.readouterr().out
+    # One full sample is worth printing; five identical ones are just noise.
+    assert out.count("dropped LoRa payload") == 1
+    assert gateway.dropped["s05/out_of_order"] == 5
+
+
+def test_restart_with_boot_id_is_announced_and_kept(capsys):
+    gateway = bridge.Gateway()
+    gateway._handle_line("數據: s05_m40,t,25,boot,AAAA1111")
+    gateway._handle_line("數據: s05_m1,t,25,boot,BBBB2222")
+
+    out = capsys.readouterr().out
+    assert "NODE RESTART: s05" in out and "BBBB2222" in out
+    # The restart is the event under investigation: it must reach the backend,
+    # not be discarded as an out-of-order counter.
+    assert gateway.upload_queue.qsize() == 2
+    assert gateway.dropped == {}

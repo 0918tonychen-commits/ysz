@@ -37,7 +37,10 @@ HOURLY_RETENTION_SECONDS = 365 * 86400
 NODE_RE = re.compile(r"^s\d{2,}$")
 SENSOR_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 EVENT_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
-META_NUMERIC = {"mcount", "rssi", "snr", "hop_rssi", "hop_snr", "loss", "level", "fallback"}
+META_NUMERIC = {
+    "mcount", "rssi", "snr", "hop_rssi", "hop_snr", "loss", "level", "fallback",
+    "rebooted",
+}
 META_ALLOWED = META_NUMERIC | {"via", "boot_id"}
 ALERT_RULES = {
     "co2": {"max": 1000, "label": "CO₂", "unit": "ppm"},
