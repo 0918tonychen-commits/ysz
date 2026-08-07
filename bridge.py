@@ -24,6 +24,7 @@ API_KEY = os.environ.get("LORA_API_KEY", "")
 QUEUE_SIZE = int(os.environ.get("UPLOAD_QUEUE_SIZE", "256"))
 MAX_SERIAL_LINE = 8192
 COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
+CACHE_FLUSH_INTERVAL = float(os.environ.get("CACHE_FLUSH_INTERVAL_SECONDS", "30"))
 
 
 class SerialWriter:
@@ -99,6 +100,25 @@ class Gateway:
         elif status not in {"duplicate", "out_of_order"}:
             print(f"WARNING: ignored LoRa payload ({status}): {raw[:200]}")
 
+    def _cache_flusher(self) -> None:
+        """Drain the SQLite backlog even while no packets are arriving.
+
+        ``upload_telemetry`` only flushes as a side effect of a new uplink, so a
+        backlog built up while the backend was down would otherwise sit there
+        until the next packet — which may never come if the nodes went quiet too.
+        """
+        while not self.stop_event.is_set():
+            self.stop_event.wait(CACHE_FLUSH_INTERVAL)
+            if self.stop_event.is_set():
+                return
+            try:
+                sent = gateway_cache.flush_local_cache()
+            except Exception as exc:
+                print(f"WARNING: idle cache flush failed: {exc}")
+                continue
+            if sent:
+                print(f"Flushed {sent} cached events from the backlog")
+
     def _command_poller(self) -> None:
         while not self.stop_event.is_set():
             for command in gateway_cache.fetch_pending_commands():
@@ -138,6 +158,10 @@ class Gateway:
             print("WARNING: LORA_API_KEY is empty; protected backend uploads will fail")
         uploader = threading.Thread(target=self._uploader, name="uploader", daemon=False)
         uploader.start()
+        flusher = threading.Thread(
+            target=self._cache_flusher, name="cache-flusher", daemon=True
+        )
+        flusher.start()
         try:
             self.serial_port = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.25)
             self.serial_writer = SerialWriter(self.serial_port)
