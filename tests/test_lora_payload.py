@@ -180,3 +180,34 @@ def test_first_boot_id_seen_is_not_treated_as_a_restart():
     _node, payload, status = parse_payload("s05_m1,t,25,boot,A1B2C3D4", tracker)
     assert status == "valid"
     assert payload["meta"]["rebooted"] == 0.0
+
+
+def test_delayed_packet_from_old_boot_cannot_switch_tracker_back():
+    tracker = MCountTracker()
+    parse_payload("s05_m40,t,25,boot,AAAA1111", tracker)
+    parse_payload("s05_m1,t,25,boot,BBBB2222", tracker)
+
+    _node, payload, status = parse_payload(
+        "s05_m41,t,25,boot,AAAA1111", tracker
+    )
+    assert status == "out_of_order"
+    assert payload is None
+    assert tracker.boot["s05"] == "BBBB2222"
+
+    _node, payload, status = parse_payload(
+        "s05_m2,t,25,boot,BBBB2222", tracker
+    )
+    assert status == "valid"
+    assert payload["meta"]["rebooted"] == 0.0
+
+
+def test_boot_history_is_bounded():
+    tracker = MCountTracker()
+    for number in range(80):
+        boot_id = f"{number:08X}"
+        _node, _payload, status = parse_payload(
+            f"s05_m1,t,25,boot,{boot_id}", tracker
+        )
+        assert status == "valid"
+    assert len(tracker.seen_boots["s05"]) == 64
+    assert tracker.boot["s05"] in tracker.seen_boots["s05"]

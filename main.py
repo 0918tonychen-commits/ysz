@@ -344,8 +344,8 @@ def _latest_rows() -> list[tuple[Any, ...]]:
 
 def check_offline_alerts() -> None:
     now = time.time()
-    for node, _data, _meta, _recorded, received in _latest_rows():
-        if now - received <= OFFLINE_TIMEOUT:
+    for node, _data, _meta, recorded, received in _latest_rows():
+        if _is_fresh_sample(recorded, received, now):
             continue
         claimed = db_claim(
             """INSERT INTO alert_state(alert_key,state,last_sent)
@@ -385,6 +385,14 @@ def check_command_timeouts() -> None:
 
 
 _last_maintenance = 0.0
+
+
+def _is_fresh_sample(recorded_at: float, received_at: float, now: float) -> bool:
+    """A backlog upload is not proof that the originating node is online."""
+    return (
+        now - received_at <= OFFLINE_TIMEOUT
+        and now - recorded_at <= OFFLINE_TIMEOUT
+    )
 
 
 def database_maintenance() -> None:
@@ -503,11 +511,13 @@ def update():
         return is_new
 
     inserted = db_run(store)
-    was_offline = db_claim(
-        """UPDATE alert_state SET state='online',last_sent=%s
-           WHERE alert_key=%s AND state='offline' RETURNING alert_key""",
-        (now, f"offline:{payload['node']}"),
-    )
+    was_offline = False
+    if _is_fresh_sample(payload["recorded_at"], now, now):
+        was_offline = db_claim(
+            """UPDATE alert_state SET state='online',last_sent=%s
+               WHERE alert_key=%s AND state='offline' RETURNING alert_key""",
+            (now, f"offline:{payload['node']}"),
+        )
     if was_offline:
         send_discord_alert(
             f"節點恢復連線｜{payload['node'].upper()}",
@@ -529,7 +539,7 @@ def all_data():
             "meta": meta,
             "recorded_at": recorded,
             "last_seen": received,
-            "online": now - received <= OFFLINE_TIMEOUT,
+            "online": _is_fresh_sample(recorded, received, now),
         }
     return jsonify(
         status="online" if any(item["online"] for item in nodes.values()) else "offline",
@@ -701,8 +711,8 @@ def command_ack():
         return jsonify(status="error", message="invalid result"), 400
     updated = db_claim(
         """UPDATE commands SET status='acked',result=%s,acked_at=%s
-           WHERE cmd_id=%s RETURNING cmd_id""",
-        (result, time.time(), cmd_id),
+           WHERE cmd_id=%s AND node=%s RETURNING cmd_id""",
+        (result, time.time(), cmd_id, node),
     )
     if not updated:
         return jsonify(status="error", message="unknown cmd_id"), 404

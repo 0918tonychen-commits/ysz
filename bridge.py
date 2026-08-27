@@ -153,6 +153,7 @@ class Gateway:
 
     def _command_poller(self) -> None:
         while not self.stop_event.is_set():
+            gateway_cache.flush_command_acks()
             for command in gateway_cache.fetch_pending_commands():
                 self._dispatch_command(command)
             self.stop_event.wait(COMMAND_POLL_INTERVAL)

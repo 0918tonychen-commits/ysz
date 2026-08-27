@@ -125,9 +125,56 @@ def test_report_command_ack_posts_to_ack_endpoint(tmp_path, monkeypatch):
         return Response(200)
 
     monkeypatch.setattr(gateway_cache.requests, "post", fake_post)
-    gateway_cache.report_command_ack("s03", "C1", "OK", rssi=-65, snr=6.1)
+    assert gateway_cache.report_command_ack("s03", "C1", "OK", rssi=-65, snr=6.1)
     assert captured["url"] == "https://backend.invalid/api/commands/ack"
     assert captured["json"] == {"node": "s03", "cmd_id": "C1", "result": "OK", "rssi": -65, "snr": 6.1}
+
+
+def test_failed_command_ack_is_persisted_and_retried(tmp_path, monkeypatch):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+    responses = iter([Response(500), Response(200)])
+    monkeypatch.setattr(
+        gateway_cache.requests, "post", lambda *args, **kwargs: next(responses)
+    )
+
+    assert not gateway_cache.report_command_ack("s03", "C1", "OK")
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE command_ack_cache SET next_attempt=0")
+        assert conn.execute("SELECT COUNT(*) FROM command_ack_cache").fetchone()[0] == 1
+
+    assert gateway_cache.flush_command_acks() == 1
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM command_ack_cache").fetchone()[0] == 0
+
+
+def test_permanent_command_ack_error_is_not_retried(tmp_path, monkeypatch):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+    monkeypatch.setattr(
+        gateway_cache.requests, "post", lambda *args, **kwargs: Response(404)
+    )
+
+    assert not gateway_cache.report_command_ack("s03", "C1", "OK")
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM command_ack_cache").fetchone()[0] == 0
+
+
+def test_command_ack_retry_uses_backoff(tmp_path, monkeypatch):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+    monkeypatch.setattr(
+        gateway_cache.requests, "post", lambda *args, **kwargs: Response(500)
+    )
+
+    gateway_cache.report_command_ack("s03", "C1", "OK")
+    assert gateway_cache.flush_command_acks() == 0
+    with sqlite3.connect(database) as conn:
+        retries, next_attempt, created_at = conn.execute(
+            "SELECT retries,next_attempt,created_at FROM command_ack_cache"
+        ).fetchone()
+    assert retries == 1
+    assert next_attempt >= created_at + 4.9
 
 
 def test_permanent_400_does_not_block_following_event(tmp_path, monkeypatch):
