@@ -18,9 +18,11 @@ _max_rows = 5000
 _max_dead_letter = 500
 _flush_batch = 10
 _flush_lock = threading.Lock()
+_ack_flush_lock = threading.Lock()
 
 TEMPORARY_STATUSES = {408, 425, 429}
 PERMANENT_STATUSES = {400, 401, 403, 404, 415, 422}
+ACK_PERMANENT_STATUSES = {400, 404, 415, 422}
 
 
 class TelemetryDeliveryError(RuntimeError):
@@ -82,6 +84,31 @@ def init_local_cache() -> None:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_event_id ON cache(event_id)"
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS command_ack_cache (
+                cmd_id TEXT PRIMARY KEY,
+                node TEXT NOT NULL,
+                result TEXT NOT NULL,
+                rssi INTEGER,
+                snr REAL,
+                created_at REAL NOT NULL,
+                last_error TEXT,
+                retries INTEGER NOT NULL DEFAULT 0,
+                next_attempt REAL NOT NULL DEFAULT 0
+            )"""
+        )
+        ack_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(command_ack_cache)").fetchall()
+        }
+        if "retries" not in ack_columns:
+            conn.execute(
+                "ALTER TABLE command_ack_cache ADD COLUMN retries INTEGER NOT NULL DEFAULT 0"
+            )
+        if "next_attempt" not in ack_columns:
+            conn.execute(
+                "ALTER TABLE command_ack_cache ADD COLUMN next_attempt REAL NOT NULL DEFAULT 0"
+            )
 
 
 def cache_count() -> int:
@@ -220,9 +247,10 @@ def report_command_ack(
     rssi: int | None = None,
     snr: float | None = None,
     timeout: float = 3.0,
-) -> None:
+) -> bool:
     if not _backend_url:
-        return
+        _save_command_ack(node, cmd_id, result, rssi, snr, "backend not configured")
+        return False
     headers = {"X-API-Key": _api_key} if _api_key else {}
     body: dict[str, Any] = {"node": node, "cmd_id": cmd_id, "result": result}
     if rssi is not None:
@@ -230,11 +258,94 @@ def report_command_ack(
     if snr is not None:
         body["snr"] = snr
     try:
-        requests.post(
+        response = requests.post(
             f"{_api_base()}/api/commands/ack", json=body, headers=headers, timeout=timeout
         )
+        if 200 <= response.status_code < 300:
+            _delete_command_ack(cmd_id)
+            return True
+        error = f"HTTP {response.status_code}"
+        if response.status_code in ACK_PERMANENT_STATUSES:
+            print(f"ERROR: permanently rejected command ACK {cmd_id}: {error}")
+            _delete_command_ack(cmd_id)
+            return False
     except requests.RequestException as exc:
-        print(f"WARNING: command ACK report failed: {exc}")
+        error = str(exc)
+    print(f"WARNING: command ACK report failed: {error}")
+    _save_command_ack(node, cmd_id, result, rssi, snr, error)
+    return False
+
+
+def _save_command_ack(
+    node: str,
+    cmd_id: str,
+    result: str,
+    rssi: int | None,
+    snr: float | None,
+    error: str,
+) -> None:
+    try:
+        init_local_cache()
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT retries FROM command_ack_cache WHERE cmd_id=?", (cmd_id,)
+            ).fetchone()
+            retries = (int(row[0]) if row else 0) + 1
+            retry_delay = min(300.0, 5.0 * (2 ** min(retries - 1, 6)))
+            conn.execute(
+                """INSERT INTO command_ack_cache
+                   (cmd_id,node,result,rssi,snr,created_at,last_error,retries,next_attempt)
+                   VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(cmd_id) DO UPDATE SET
+                     node=excluded.node,result=excluded.result,rssi=excluded.rssi,
+                     snr=excluded.snr,last_error=excluded.last_error,
+                     retries=excluded.retries,next_attempt=excluded.next_attempt""",
+                (
+                    cmd_id, node, result, rssi, snr, time.time(), error[:500],
+                    retries, time.time() + retry_delay,
+                ),
+            )
+            conn.execute(
+                """DELETE FROM command_ack_cache WHERE cmd_id IN
+                   (SELECT cmd_id FROM command_ack_cache
+                    ORDER BY created_at DESC LIMIT -1 OFFSET 500)"""
+            )
+    except sqlite3.Error as exc:
+        print(f"CRITICAL: command ACK cache write failed: {exc}")
+
+
+def _delete_command_ack(cmd_id: str) -> None:
+    try:
+        init_local_cache()
+        with _connect() as conn:
+            conn.execute("DELETE FROM command_ack_cache WHERE cmd_id=?", (cmd_id,))
+    except sqlite3.Error as exc:
+        print(f"WARNING: command ACK cache cleanup failed: {exc}")
+
+
+def flush_command_acks() -> int:
+    """Retry persisted node acknowledgements; keep failures for the next poll."""
+    if not _ack_flush_lock.acquire(blocking=False):
+        return 0
+    try:
+        try:
+            init_local_cache()
+            with _connect() as conn:
+                rows = conn.execute(
+                    """SELECT node,cmd_id,result,rssi,snr FROM command_ack_cache
+                       WHERE next_attempt <= ? ORDER BY next_attempt,created_at LIMIT 10""",
+                    (time.time(),),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            print(f"WARNING: command ACK cache read failed: {exc}")
+            return 0
+        sent = 0
+        for node, cmd_id, result, rssi, snr in rows:
+            if report_command_ack(node, cmd_id, result, rssi=rssi, snr=snr):
+                sent += 1
+        return sent
+    finally:
+        _ack_flush_lock.release()
 
 
 def flush_local_cache() -> int:

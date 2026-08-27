@@ -201,6 +201,9 @@ def test_command_ack_known_returns_success(monkeypatch):
             headers=AUTH,
         )
     assert response.status_code == 200
+    query, params = cursor.executed[0]
+    assert "AND node=%s" in query
+    assert params[-1] == "s03"
 
 
 def test_command_ack_rejects_bad_node(monkeypatch):
@@ -298,3 +301,17 @@ def test_failed_transaction_discards_the_connection(monkeypatch):
     monkeypatch.setattr(main, "_discard_connection", lambda: discarded.append(True))
     main.db_execute("UPDATE commands SET status='x'")
     assert discarded == [True]
+
+
+def test_backlog_sample_is_not_considered_online():
+    now = 10_000.0
+    assert not main._is_fresh_sample(
+        now - main.OFFLINE_TIMEOUT - 1,
+        now,
+        now,
+    )
+
+
+def test_recent_sample_and_delivery_are_online():
+    now = 10_000.0
+    assert main._is_fresh_sample(now - 1, now - 1, now)

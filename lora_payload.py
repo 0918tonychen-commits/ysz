@@ -30,6 +30,7 @@ BOOT_ID_RE = re.compile(r"^[0-9A-Fa-f]{4,32}$")
 BOOT_INLINE_RE = re.compile(
     r"^boot(?:_id)?\s*[:=]\s*([0-9A-Fa-f]{4,32})$", re.IGNORECASE
 )
+MAX_SEEN_BOOTS_PER_NODE = 64
 
 META_KEYS = {
     "mcount",
@@ -92,13 +93,18 @@ class MCountTracker:
     received: dict[str, int] = field(default_factory=dict)
     lost: dict[str, int] = field(default_factory=dict)
     boot: dict[str, str] = field(default_factory=dict)
+    seen_boots: dict[str, set[str]] = field(default_factory=dict)
 
     def rebooted(self, node: str, boot_id: str | None) -> bool:
         """True when boot_id proves the node restarted since the last packet."""
         if boot_id is None:
             return False
         previous = self.boot.get(node)
-        return previous is not None and previous != boot_id
+        return (
+            previous is not None
+            and previous != boot_id
+            and boot_id not in self.seen_boots.get(node, set())
+        )
 
     def classify(
         self,
@@ -108,6 +114,17 @@ class MCountTracker:
         boot_id: str | None = None,
     ) -> ParseStatus:
         now = time.monotonic() if now is None else now
+        # A packet from an already superseded boot can arrive late through a
+        # relay.  It must not switch the tracker back and manufacture another
+        # restart when the current boot's next packet arrives.
+        current_boot = self.boot.get(node)
+        if (
+            boot_id is not None
+            and current_boot is not None
+            and boot_id != current_boot
+            and boot_id in self.seen_boots.get(node, set())
+        ):
+            return "out_of_order"
         # A new boot_id explains any counter jump, in either direction, with no
         # dependence on how long the node was away.
         if self.rebooted(node, boot_id):
@@ -146,6 +163,12 @@ class MCountTracker:
         self.last_seen[node] = now
         if boot_id is not None:
             self.boot[node] = boot_id
+            seen = self.seen_boots.setdefault(node, set())
+            seen.add(boot_id)
+            # Retain enough history to cover delayed relay packets without
+            # allowing a process-lifetime set to grow forever.
+            while len(seen) > MAX_SEEN_BOOTS_PER_NODE:
+                seen.remove(next(item for item in seen if item != boot_id))
         total = self.received[node] + self.lost[node]
         return round(self.lost[node] * 100.0 / total, 1) if total else 0.0
 
