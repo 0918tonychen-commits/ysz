@@ -8,6 +8,7 @@ fake to drive the endpoint logic without a real database.
 """
 
 import contextlib
+from functools import partial
 import os
 import time
 
@@ -393,3 +394,134 @@ def test_fresh_reading_still_alerts(monkeypatch):
 
     assert len(sent) == 1
     assert "S03" in sent[0][0]
+
+
+# --- an alert Discord never accepted must not silence the next one -----------
+
+class _FakeResponse:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+def _capture_posts(monkeypatch, responses):
+    """Serve ``responses`` (a status code or an exception per attempt)."""
+    calls = []
+
+    def post(url, json=None, timeout=None):
+        calls.append(json)
+        outcome = responses[len(calls) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(main.requests, "post", post)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(main, "DISCORD_WEBHOOK_URL", "https://discord.invalid/hook")
+    return calls
+
+
+def test_delivery_reports_success_on_a_2xx(monkeypatch):
+    calls = _capture_posts(monkeypatch, [_FakeResponse(204)])
+
+    assert main._deliver_discord("t", "m", 0) is True
+    assert len(calls) == 1
+
+
+def test_delivery_retries_once_after_a_network_error(monkeypatch):
+    calls = _capture_posts(
+        monkeypatch, [main.requests.RequestException("boom"), _FakeResponse(204)]
+    )
+
+    assert main._deliver_discord("t", "m", 0) is True
+    assert len(calls) == 2
+
+
+def test_delivery_gives_up_and_reports_failure(monkeypatch):
+    calls = _capture_posts(monkeypatch, [_FakeResponse(500), _FakeResponse(502)])
+
+    assert main._deliver_discord("t", "m", 0) is False
+    assert len(calls) == 2
+
+
+def test_a_revoked_webhook_is_not_retried(monkeypatch):
+    """404/401 fails identically the second time; retrying just delays the log."""
+    calls = _capture_posts(monkeypatch, [_FakeResponse(404)])
+
+    assert main._deliver_discord("t", "m", 0) is False
+    assert len(calls) == 1
+
+
+def test_rate_limit_waits_the_retry_after_it_was_given(monkeypatch):
+    _capture_posts(
+        monkeypatch,
+        [_FakeResponse(429, {"Retry-After": "3"}), _FakeResponse(204)],
+    )
+    slept = []
+    monkeypatch.setattr(main.time, "sleep", slept.append)
+
+    assert main._deliver_discord("t", "m", 0) is True
+    assert slept == [3.0]
+
+
+def test_absurd_retry_after_falls_back_to_the_default_delay(monkeypatch):
+    response = _FakeResponse(429, {"Retry-After": "6000"})
+
+    assert main._discord_retry_delay(response, 2.0) == 2.0
+
+
+def test_failed_delivery_releases_the_threshold_cooldown(monkeypatch):
+    """The whole point: a dropped alert must not also eat the 10-minute slot."""
+    monkeypatch.setattr(main, "DISCORD_WEBHOOK_URL", "https://discord.invalid/hook")
+    monkeypatch.setattr(main, "_deliver_discord", lambda *a: False)
+    released = []
+    monkeypatch.setattr(
+        main, "db_claim", lambda query, params: released.append((query, params))
+    )
+    threads = []
+    monkeypatch.setattr(
+        main.threading, "Thread", lambda target, daemon: _InlineThread(target, threads)
+    )
+
+    main.send_discord_alert(
+        "t", "m", on_failure=partial(main._release_threshold_slot, "k", 1.0)
+    )
+
+    assert len(released) == 1
+    query, params = released[0]
+    assert query.startswith("DELETE FROM alert_state")
+    assert params == ("k", 1.0)
+
+
+def test_delivered_alert_keeps_the_cooldown(monkeypatch):
+    monkeypatch.setattr(main, "DISCORD_WEBHOOK_URL", "https://discord.invalid/hook")
+    monkeypatch.setattr(main, "_deliver_discord", lambda *a: True)
+    monkeypatch.setattr(
+        main, "db_claim", lambda *a, **k: pytest.fail("must not roll back")
+    )
+    threads = []
+    monkeypatch.setattr(
+        main.threading, "Thread", lambda target, daemon: _InlineThread(target, threads)
+    )
+
+    main.send_discord_alert("t", "m", on_failure=lambda: pytest.fail("delivered"))
+
+
+def test_unconfigured_webhook_logs_instead_of_rolling_back(monkeypatch):
+    """With no webhook the log line is the delivery; rolling back would make
+    every pass re-alert into the same log."""
+    monkeypatch.setattr(main, "DISCORD_WEBHOOK_URL", "")
+
+    main.send_discord_alert("t", "m", on_failure=lambda: pytest.fail("no rollback"))
+
+
+class _InlineThread:
+    """Run the alert body synchronously so the test can assert on its effects."""
+
+    def __init__(self, target, started):
+        self._target = target
+        self._started = started
+
+    def start(self):
+        self._started.append(self)
+        self._target()

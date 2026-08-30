@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import hmac
 import json
 import math
@@ -31,6 +32,9 @@ API_KEY = os.environ.get("LORA_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 OFFLINE_TIMEOUT = int(os.environ.get("OFFLINE_TIMEOUT_SECONDS", "180"))
 ALERT_COOLDOWN = 600
+DISCORD_SEND_ATTEMPTS = 2
+DISCORD_RETRY_DELAY = 2.0
+DISCORD_RETRY_CAP = 30.0
 RETENTION_SECONDS = 7 * 86400
 HOURLY_RETENTION_SECONDS = 365 * 86400
 
@@ -296,22 +300,108 @@ def _validate_payload(body: Any) -> tuple[dict[str, Any] | None, str | None]:
     }, None
 
 
-def send_discord_alert(title: str, message: str, color: int = 0xFF003C) -> None:
+def _discord_retry_delay(response: requests.Response, default: float) -> float:
+    """Honour a 429's Retry-After when it is short enough to be worth waiting."""
+    try:
+        delay = float(response.headers.get("Retry-After", ""))
+    except ValueError:
+        return default
+    return delay if 0 <= delay <= DISCORD_RETRY_CAP else default
+
+
+def _deliver_discord(title: str, message: str, color: int) -> bool:
+    """POST the alert, retrying once. True only when Discord accepted it."""
+    embed = {"embeds": [{"title": title, "description": message, "color": color}]}
+    reason = "no attempt made"
+    for attempt in range(DISCORD_SEND_ATTEMPTS):
+        delay = DISCORD_RETRY_DELAY
+        try:
+            response = requests.post(DISCORD_WEBHOOK_URL, json=embed, timeout=5)
+            if response.status_code < 300:
+                return True
+            reason = f"HTTP {response.status_code}"
+            if response.status_code == 429:
+                delay = _discord_retry_delay(response, delay)
+            elif response.status_code < 500:
+                # A revoked webhook or a rejected body fails the same way twice.
+                break
+        except requests.RequestException as exc:
+            reason = str(exc)
+        if attempt + 1 < DISCORD_SEND_ATTEMPTS:
+            time.sleep(delay)
+    print(f"WARNING: Discord alert not delivered ({reason}): {title}: {message}")
+    return False
+
+
+def send_discord_alert(
+    title: str,
+    message: str,
+    color: int = 0xFF003C,
+    on_failure: Callable[[], None] | None = None,
+) -> None:
+    """Deliver an alert in the background.
+
+    ``on_failure`` runs when Discord never accepted the message. Callers that
+    claimed a cooldown or state slot before calling pass one to hand that slot
+    back: without it a dropped alert also silences the next one, which is how a
+    single failed POST turns into ten quiet minutes.
+
+    With no webhook configured the log line *is* the delivery, so it counts as
+    success — otherwise an unconfigured deployment would roll back and re-alert
+    on every pass.
+    """
     if not DISCORD_WEBHOOK_URL:
         print(f"ALERT: {title}: {message}")
         return
 
     def send() -> None:
+        if _deliver_discord(title, message, color) or on_failure is None:
+            return
         try:
-            requests.post(
-                DISCORD_WEBHOOK_URL,
-                json={"embeds": [{"title": title, "description": message, "color": color}]},
-                timeout=5,
-            )
-        except requests.RequestException as exc:
-            print(f"WARNING: Discord alert failed: {exc}")
+            on_failure()
+        except Exception as exc:  # a lost alert must not also kill the thread
+            print(f"WARNING: alert rollback failed: {exc}")
 
     threading.Thread(target=send, daemon=True).start()
+
+
+def _release_threshold_slot(key: str, claimed_at: float) -> None:
+    """Undo a threshold claim whose alert never arrived, so the next excursion
+    can alert immediately instead of waiting out a cooldown nobody was told
+    about. Guarded on ``last_sent``: a newer claim owns the slot and stays.
+    Dropping the row is a full undo — nothing reads it but the cooldown test.
+    """
+    db_claim(
+        "DELETE FROM alert_state WHERE alert_key=%s AND last_sent=%s RETURNING alert_key",
+        (key, claimed_at),
+    )
+
+
+def _release_offline_state(node: str, claimed_at: float) -> None:
+    """Undo an offline transition whose alert never arrived; the next monitor
+    pass re-announces it. Dropping the row rather than restoring 'online' is
+    deliberate: nobody heard the node go down, so nobody is owed a recovery
+    notice for it either.
+    """
+    db_claim(
+        """DELETE FROM alert_state
+           WHERE alert_key=%s AND state='offline' AND last_sent=%s
+           RETURNING alert_key""",
+        (f"offline:{node}", claimed_at),
+    )
+
+
+def _restore_offline_state(node: str, claimed_at: float) -> None:
+    """Undo a recovery transition whose alert never arrived. Back in 'offline'
+    the node's next packet re-claims it and tries again; the monitor stays
+    quiet because it only alerts on a state that is not already 'offline'.
+    """
+    db_claim(
+        """UPDATE alert_state SET state='offline'
+           WHERE alert_key=%s AND state='online' AND last_sent=%s
+           RETURNING alert_key""",
+        (f"offline:{node}", claimed_at),
+    )
 
 
 def check_threshold_alerts(node: str, data: dict[str, float], recorded_at: float) -> None:
@@ -338,6 +428,7 @@ def check_threshold_alerts(node: str, data: dict[str, float], recorded_at: float
             send_discord_alert(
                 f"數值超標｜{node.upper()}",
                 f"{rule['label']} {data[sensor]} {rule['unit']}，上限 {rule['max']}",
+                on_failure=partial(_release_threshold_slot, key, now),
             )
 
 
@@ -367,6 +458,7 @@ def check_offline_alerts() -> None:
                 f"節點離線｜{node.upper()}",
                 f"已超過 {OFFLINE_TIMEOUT} 秒沒有回報",
                 0xFFA500,
+                on_failure=partial(_release_offline_state, node, now),
             )
 
 def check_command_timeouts() -> None:
@@ -529,6 +621,7 @@ def update():
             f"節點恢復連線｜{payload['node'].upper()}",
             "節點已重新開始回報",
             0x39FF14,
+            on_failure=partial(_restore_offline_state, payload["node"], now),
         )
     if inserted:
         check_threshold_alerts(
