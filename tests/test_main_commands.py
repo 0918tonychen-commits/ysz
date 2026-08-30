@@ -9,6 +9,7 @@ fake to drive the endpoint logic without a real database.
 
 import contextlib
 import os
+import time
 
 # Must be set before importing main (it validates these at import time).
 os.environ.setdefault("DATABASE_URL", "postgresql://fake/db")
@@ -315,3 +316,80 @@ def test_backlog_sample_is_not_considered_online():
 def test_recent_sample_and_delivery_are_online():
     now = 10_000.0
     assert main._is_fresh_sample(now - 1, now - 1, now)
+
+
+# --- dispatch_failed: a claimed command that never reached the radio ----------
+
+def test_dispatch_failed_requires_auth():
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/dispatch_failed", json={"node": "s03", "cmd_id": "Cabc"}
+        )
+    assert response.status_code == 401
+
+
+def test_dispatch_failed_marks_only_a_command_still_in_flight(monkeypatch):
+    cursor = FakeCursor(fetchone=("Cabc",))
+    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
+    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: None)
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/dispatch_failed",
+            json={"node": "s03", "cmd_id": "Cabc", "reason": "port unavailable"},
+            headers=AUTH,
+        )
+    assert response.status_code == 200
+    query, params = cursor.executed[0]
+    assert "status='dispatch_failed'" in query
+    # An ACK that raced us in wins: it proves the node did get the command.
+    assert "AND status='sent'" in query
+    assert params[0] == "ERR_DISPATCH: port unavailable"
+
+
+def test_dispatch_failed_on_already_settled_command_returns_404(monkeypatch):
+    cursor = FakeCursor(fetchone=None)
+    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/dispatch_failed",
+            json={"node": "s03", "cmd_id": "Cabc", "reason": "port unavailable"},
+            headers=AUTH,
+        )
+    assert response.status_code == 404
+
+
+def test_dispatch_failed_rejects_oversized_reason(monkeypatch):
+    with main.app.test_client() as client:
+        response = client.post(
+            "/api/commands/dispatch_failed",
+            json={"node": "s03", "cmd_id": "Cabc", "reason": "x" * 201},
+            headers=AUTH,
+        )
+    assert response.status_code == 400
+
+
+# --- threshold alerts must describe now, not a backlog replay ----------------
+
+def test_stale_backlog_reading_does_not_raise_a_current_alert(monkeypatch):
+    """Flushing a 3-day backlog must not report old excursions as happening now."""
+    sent = []
+    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(
+        main, "db_claim", lambda *a, **k: pytest.fail("must not touch alert_state")
+    )
+    stale = time.time() - 3 * 86400
+
+    main.check_threshold_alerts("s03", {"co2": 5000.0}, stale)
+
+    assert sent == []
+
+
+def test_fresh_reading_still_alerts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(main, "db_claim", lambda *a, **k: True)
+
+    main.check_threshold_alerts("s03", {"co2": 5000.0}, time.time())
+
+    assert len(sent) == 1
+    assert "S03" in sent[0][0]

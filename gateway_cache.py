@@ -19,6 +19,8 @@ _max_dead_letter = 500
 _flush_batch = 10
 _flush_lock = threading.Lock()
 _ack_flush_lock = threading.Lock()
+_init_lock = threading.Lock()
+_initialized_db: str | None = None
 
 TEMPORARY_STATUSES = {408, 425, 429}
 PERMANENT_STATUSES = {400, 401, 403, 404, 415, 422}
@@ -47,6 +49,35 @@ def configure(
 
 
 def init_local_cache() -> None:
+    """Create and migrate the schema once per database path.
+
+    Every cache operation calls this, so it has to be free on the hot path: it
+    used to re-run the whole DDL and a full-table backfill on each call, ~21ms
+    with the cache at its 5000-row cap — paid on the serial reader thread
+    whenever the upload queue was full. The guard is keyed on ``_local_db`` so
+    ``configure`` pointing at another database still re-runs it.
+    """
+    global _initialized_db
+    if _initialized_db == _local_db:
+        return
+    with _init_lock:
+        if _initialized_db == _local_db:  # another thread won the race
+            return
+        _init_schema()
+        _initialized_db = _local_db
+
+
+def _invalidate_schema_cache() -> None:
+    """Re-run the schema check after a SQLite failure.
+
+    Without this the guard above would turn a recoverable state — the database
+    file deleted or replaced under a running gateway — into a permanent one.
+    """
+    global _initialized_db
+    _initialized_db = None
+
+
+def _init_schema() -> None:
     with _connect() as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS cache (
@@ -77,9 +108,12 @@ def init_local_cache() -> None:
             row[1] for row in conn.execute("PRAGMA table_info(cache)").fetchall()
         }
         timestamp_source = "timestamp" if "timestamp" in columns else "NULL"
+        # Filtered, not blanket: without the WHERE this rewrote every row on
+        # every call even when there was nothing left to backfill.
         conn.execute(
             "UPDATE cache SET event_id=COALESCE(event_id,'legacy-'||id), "
-            f"recorded_at=COALESCE(recorded_at,{timestamp_source},strftime('%s','now'))"
+            f"recorded_at=COALESCE(recorded_at,{timestamp_source},strftime('%s','now')) "
+            "WHERE event_id IS NULL OR recorded_at IS NULL"
         )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_event_id ON cache(event_id)"
@@ -204,6 +238,7 @@ def save_to_local_cache(
                 print(f"WARNING: dead-letter limit exceeded; dropped {drop} oldest quarantined events")
         return True
     except sqlite3.Error as exc:
+        _invalidate_schema_cache()
         print(f"CRITICAL: SQLite cache write failed: {exc}")
         return False
 
@@ -237,6 +272,33 @@ def fetch_pending_commands(timeout: float = 3.0) -> list[dict[str, Any]]:
     except (requests.RequestException, ValueError) as exc:
         print(f"WARNING: command poll failed: {exc}")
     return []
+
+
+def report_dispatch_failure(
+    node: str, cmd_id: str, reason: str, timeout: float = 3.0
+) -> bool:
+    """Tell the backend a claimed command never reached the serial link.
+
+    Best-effort: the backend already expires unacknowledged commands, so a
+    failure here costs a clearer status, not correctness. It is deliberately not
+    persisted for retry — the command is not being redelivered either.
+    """
+    if not _backend_url:
+        return False
+    headers = {"X-API-Key": _api_key} if _api_key else {}
+    try:
+        response = requests.post(
+            f"{_api_base()}/api/commands/dispatch_failed",
+            json={"node": node, "cmd_id": cmd_id, "reason": reason[:200]},
+            headers=headers,
+            timeout=timeout,
+        )
+        if 200 <= response.status_code < 300:
+            return True
+        print(f"WARNING: dispatch failure report rejected: HTTP {response.status_code}")
+    except requests.RequestException as exc:
+        print(f"WARNING: dispatch failure report failed: {exc}")
+    return False
 
 
 def report_command_ack(
@@ -276,6 +338,25 @@ def report_command_ack(
     return False
 
 
+def save_command_ack_for_retry(
+    node: str,
+    cmd_id: str,
+    result: str,
+    *,
+    rssi: int | None = None,
+    snr: float | None = None,
+) -> None:
+    """Persist an ACK for the background poller without spending an attempt.
+
+    For callers that must not block on the network — the serial reader — this
+    makes the acknowledgement durable now and leaves delivery to
+    ``flush_command_acks``, due immediately rather than after a retry backoff.
+    """
+    _save_command_ack(
+        node, cmd_id, result, rssi, snr, "queued for delivery", count_attempt=False
+    )
+
+
 def _save_command_ack(
     node: str,
     cmd_id: str,
@@ -283,6 +364,8 @@ def _save_command_ack(
     rssi: int | None,
     snr: float | None,
     error: str,
+    *,
+    count_attempt: bool = True,
 ) -> None:
     try:
         init_local_cache()
@@ -290,8 +373,15 @@ def _save_command_ack(
             row = conn.execute(
                 "SELECT retries FROM command_ack_cache WHERE cmd_id=?", (cmd_id,)
             ).fetchone()
-            retries = (int(row[0]) if row else 0) + 1
-            retry_delay = min(300.0, 5.0 * (2 ** min(retries - 1, 6)))
+            previous = int(row[0]) if row else 0
+            # A queued-but-never-tried ACK has not failed at anything, so it
+            # neither burns a retry nor waits out a backoff it did not earn.
+            retries = previous + 1 if count_attempt else previous
+            next_attempt = (
+                time.time() + min(300.0, 5.0 * (2 ** min(retries - 1, 6)))
+                if count_attempt
+                else 0.0  # due now, not "now + 0": never race the flush clock
+            )
             conn.execute(
                 """INSERT INTO command_ack_cache
                    (cmd_id,node,result,rssi,snr,created_at,last_error,retries,next_attempt)
@@ -302,7 +392,7 @@ def _save_command_ack(
                      retries=excluded.retries,next_attempt=excluded.next_attempt""",
                 (
                     cmd_id, node, result, rssi, snr, time.time(), error[:500],
-                    retries, time.time() + retry_delay,
+                    retries, next_attempt,
                 ),
             )
             conn.execute(
@@ -311,6 +401,7 @@ def _save_command_ack(
                     ORDER BY created_at DESC LIMIT -1 OFFSET 500)"""
             )
     except sqlite3.Error as exc:
+        _invalidate_schema_cache()
         print(f"CRITICAL: command ACK cache write failed: {exc}")
 
 
@@ -320,6 +411,7 @@ def _delete_command_ack(cmd_id: str) -> None:
         with _connect() as conn:
             conn.execute("DELETE FROM command_ack_cache WHERE cmd_id=?", (cmd_id,))
     except sqlite3.Error as exc:
+        _invalidate_schema_cache()
         print(f"WARNING: command ACK cache cleanup failed: {exc}")
 
 
@@ -337,6 +429,7 @@ def flush_command_acks() -> int:
                     (time.time(),),
                 ).fetchall()
         except sqlite3.Error as exc:
+            _invalidate_schema_cache()
             print(f"WARNING: command ACK cache read failed: {exc}")
             return 0
         sent = 0
@@ -385,6 +478,12 @@ def flush_local_cache() -> int:
                 with _connect() as conn:
                     conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
                 sent += 1
+                # Per-packet, not per-batch: the console is how an operator sees
+                # a specific mcount make it out, which a count would hide.
+                print(
+                    f"UPLOADED: node={envelope.get('node')} "
+                    f"mcount={envelope.get('meta', {}).get('mcount', '?')}"
+                )
             elif status in PERMANENT_STATUSES:
                 print(
                     f"ERROR: quarantining permanently rejected event row "
@@ -406,32 +505,3 @@ def flush_local_cache() -> int:
         return sent
     finally:
         _flush_lock.release()
-
-
-def upload_telemetry(
-    node_id: str,
-    payload: dict[str, Any],
-    *,
-    recorded_at: float | None = None,
-    event_id: str | None = None,
-) -> bool:
-    envelope = _envelope(node_id, payload, recorded_at, event_id)
-    flush_local_cache()
-    try:
-        response = _post(envelope, 3.0)
-        if 200 <= response.status_code < 300:
-            return True
-        error = f"HTTP {response.status_code}"
-    except requests.RequestException as exc:
-        error = str(exc)
-    if not save_to_local_cache(
-        node_id,
-        payload,
-        recorded_at=envelope["recorded_at"],
-        event_id=envelope["event_id"],
-        last_error=error,
-    ):
-        raise TelemetryDeliveryError(
-            f"upload failed ({error}) and telemetry could not be cached"
-        )
-    return False

@@ -314,8 +314,14 @@ def send_discord_alert(title: str, message: str, color: int = 0xFF003C) -> None:
     threading.Thread(target=send, daemon=True).start()
 
 
-def check_threshold_alerts(node: str, data: dict[str, float]) -> None:
+def check_threshold_alerts(node: str, data: dict[str, float], recorded_at: float) -> None:
     now = time.time()
+    # A backlog upload is not a live excursion. Reporting one as current is
+    # wrong on its own, but it also spends the cooldown slot below, which would
+    # then suppress a genuine excursion arriving minutes later. Same freshness
+    # test the offline/online transition uses.
+    if not _is_fresh_sample(recorded_at, now, now):
+        return
     for sensor, rule in ALERT_RULES.items():
         if sensor not in data or data[sensor] <= rule["max"]:
             continue
@@ -525,7 +531,9 @@ def update():
             0x39FF14,
         )
     if inserted:
-        check_threshold_alerts(payload["node"], payload["data"])
+        check_threshold_alerts(
+            payload["node"], payload["data"], payload["recorded_at"]
+        )
     return jsonify(status="success", duplicate=not inserted), 200
 
 
@@ -720,6 +728,44 @@ def command_ack():
         f"指令已執行｜{node.upper()}",
         f"cmd_id={cmd_id} 結果={result}",
         0xFF003C if result.startswith("ERR") else 0x39FF14,  # PONG/OK* 皆為成功,ERR* 才紅
+    )
+    return jsonify(status="success"), 200
+
+
+@app.post("/api/commands/dispatch_failed")
+def command_dispatch_failed():
+    """Gateway-facing: a claimed command never made it onto the serial link.
+
+    /api/commands/pending marks rows 'sent' when it hands them over, so a
+    gateway that then fails to write is holding a command the operator is
+    watching succeed. Delivery stays at-most-once — the command is not requeued,
+    because REBOOT and the PROMOTE/DEMOTE pair are not safe to repeat without
+    cmd_id de-duplication on the node. This only stops the lie.
+    """
+    if not _authorized():
+        return jsonify(status="error", message="unauthorized"), 401
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(status="error", message="JSON body must be an object"), 400
+    cmd_id, node, reason = body.get("cmd_id"), body.get("node"), body.get("reason", "")
+    if not isinstance(cmd_id, str) or not cmd_id or len(cmd_id) > 32:
+        return jsonify(status="error", message="invalid cmd_id"), 400
+    if not isinstance(node, str) or not NODE_RE.fullmatch(node):
+        return jsonify(status="error", message="invalid node"), 400
+    if not isinstance(reason, str) or len(reason) > 200:
+        return jsonify(status="error", message="invalid reason"), 400
+    # Only a command still believed to be in flight: an ACK that raced us in
+    # means it did reach the node, and that answer is the truthful one.
+    updated = db_claim(
+        """UPDATE commands SET status='dispatch_failed',result=%s
+           WHERE cmd_id=%s AND node=%s AND status='sent' RETURNING cmd_id""",
+        (f"ERR_DISPATCH: {reason}"[:200], cmd_id, node),
+    )
+    if not updated:
+        return jsonify(status="error", message="unknown or already settled cmd_id"), 404
+    send_discord_alert(
+        f"指令未送出｜{node.upper()}",
+        f"cmd_id={cmd_id} 原因={reason}",
     )
     return jsonify(status="success"), 200
 
