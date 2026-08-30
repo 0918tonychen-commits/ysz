@@ -367,11 +367,20 @@ class Gateway:
                 print(
                     f"WARNING: uploader still working after {SHUTDOWN_DRAIN_SECONDS}s"
                 )
-            stranded = self._drain_upload_queue_to_cache()
-            if stranded:
-                print(f"Persisted {stranded} events that had not been uploaded yet")
-            if self.serial_port and self.serial_port.is_open:
-                self.serial_port.close()
+            # Cleanup runs on the way out of a failure, so it must not be able
+            # to replace the exception that caused it — losing the real cause,
+            # and skipping the steps after whichever one raised.
+            try:
+                stranded = self._drain_upload_queue_to_cache()
+                if stranded:
+                    print(f"Persisted {stranded} events that had not been uploaded yet")
+            except Exception as exc:
+                print(f"CRITICAL: could not persist queued events on shutdown: {exc}")
+            try:
+                if self.serial_port and self.serial_port.is_open:
+                    self.serial_port.close()
+            except Exception as exc:
+                print(f"WARNING: closing the serial port failed: {exc}")
 
 
 def main() -> None:

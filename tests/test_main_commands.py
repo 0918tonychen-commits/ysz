@@ -9,6 +9,7 @@ fake to drive the endpoint logic without a real database.
 
 import contextlib
 import os
+import time
 
 # Must be set before importing main (it validates these at import time).
 os.environ.setdefault("DATABASE_URL", "postgresql://fake/db")
@@ -365,3 +366,30 @@ def test_dispatch_failed_rejects_oversized_reason(monkeypatch):
             headers=AUTH,
         )
     assert response.status_code == 400
+
+
+# --- threshold alerts must describe now, not a backlog replay ----------------
+
+def test_stale_backlog_reading_does_not_raise_a_current_alert(monkeypatch):
+    """Flushing a 3-day backlog must not report old excursions as happening now."""
+    sent = []
+    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(
+        main, "db_claim", lambda *a, **k: pytest.fail("must not touch alert_state")
+    )
+    stale = time.time() - 3 * 86400
+
+    main.check_threshold_alerts("s03", {"co2": 5000.0}, stale)
+
+    assert sent == []
+
+
+def test_fresh_reading_still_alerts(monkeypatch):
+    sent = []
+    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(main, "db_claim", lambda *a, **k: True)
+
+    main.check_threshold_alerts("s03", {"co2": 5000.0}, time.time())
+
+    assert len(sent) == 1
+    assert "S03" in sent[0][0]

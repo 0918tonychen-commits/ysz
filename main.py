@@ -314,8 +314,14 @@ def send_discord_alert(title: str, message: str, color: int = 0xFF003C) -> None:
     threading.Thread(target=send, daemon=True).start()
 
 
-def check_threshold_alerts(node: str, data: dict[str, float]) -> None:
+def check_threshold_alerts(node: str, data: dict[str, float], recorded_at: float) -> None:
     now = time.time()
+    # A backlog upload is not a live excursion. Reporting one as current is
+    # wrong on its own, but it also spends the cooldown slot below, which would
+    # then suppress a genuine excursion arriving minutes later. Same freshness
+    # test the offline/online transition uses.
+    if not _is_fresh_sample(recorded_at, now, now):
+        return
     for sensor, rule in ALERT_RULES.items():
         if sensor not in data or data[sensor] <= rule["max"]:
             continue
@@ -525,7 +531,9 @@ def update():
             0x39FF14,
         )
     if inserted:
-        check_threshold_alerts(payload["node"], payload["data"])
+        check_threshold_alerts(
+            payload["node"], payload["data"], payload["recorded_at"]
+        )
     return jsonify(status="success", duplicate=not inserted), 200
 
 

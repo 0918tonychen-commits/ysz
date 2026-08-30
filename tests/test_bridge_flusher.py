@@ -438,3 +438,25 @@ def test_successful_dispatch_reports_nothing(monkeypatch):
     )
 
     assert written == ["CMD Cabc s03 SET_LEVEL 2"]
+
+
+def test_shutdown_cleanup_cannot_mask_the_real_cause(monkeypatch, capsys):
+    """A failing drain must not replace the exception that ended the run."""
+    _prepare_run(monkeypatch)
+
+    def fail_to_open(*args, **kwargs):
+        raise bridge.serial.SerialException("port unavailable")
+
+    monkeypatch.setattr(bridge.serial, "Serial", fail_to_open)
+    gateway = bridge.Gateway()
+    monkeypatch.setattr(
+        gateway,
+        "_drain_upload_queue_to_cache",
+        lambda: (_ for _ in ()).throw(RuntimeError("drain blew up")),
+    )
+
+    with pytest.raises(bridge.serial.SerialException, match="port unavailable"):
+        gateway.run()
+
+    out = capsys.readouterr().out
+    assert "could not persist queued events on shutdown: drain blew up" in out
