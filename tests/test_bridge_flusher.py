@@ -410,3 +410,91 @@ def test_a_network_outage_is_not_an_outbox_failure(monkeypatch):
     gateway._uploader()
 
     assert gateway.fatal_reason is None
+
+
+# --- the command plane must survive its own failures --------------------------
+
+def test_poller_survives_an_unexpected_failure(monkeypatch, capsys):
+    """One bad cycle must not end commands and ACKs for the rest of the run."""
+    gateway = bridge.Gateway()
+    monkeypatch.setattr(bridge, "COMMAND_POLL_INTERVAL", 0.001)
+    cycles = []
+
+    def flaky():
+        cycles.append(True)
+        if len(cycles) == 1:
+            raise RuntimeError("something unforeseen")
+        if len(cycles) == 3:
+            gateway.stop_event.set()
+        return 0
+
+    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", flaky)
+    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", lambda: [])
+    gateway._command_poller()
+
+    # It kept going after the exception rather than dying silently.
+    assert len(cycles) == 3
+    assert "command plane cycle failed (1x): something unforeseen" in capsys.readouterr().out
+
+
+def test_poller_failure_is_not_fatal(monkeypatch):
+    """Telemetry does not run through here, so a broken command plane degrades."""
+    gateway = bridge.Gateway()
+    monkeypatch.setattr(bridge, "COMMAND_POLL_INTERVAL", 0.001)
+    calls = []
+
+    def always_broken():
+        calls.append(True)
+        if len(calls) == 5:
+            gateway.stop_event.set()
+        raise RuntimeError("command plane is down")
+
+    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", always_broken)
+    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", lambda: [])
+    gateway._command_poller()
+
+    assert gateway.fatal_reason is None
+    assert not gateway.stop_event.is_set() or len(calls) == 5
+
+
+def test_repeated_poller_failures_are_not_logged_every_cycle(monkeypatch, capsys):
+    gateway = bridge.Gateway()
+    monkeypatch.setattr(bridge, "COMMAND_POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(bridge, "COMMAND_FAILURE_REPORT_EVERY", 5)
+    calls = []
+
+    def always_broken():
+        calls.append(True)
+        if len(calls) == 12:
+            gateway.stop_event.set()
+        raise RuntimeError("still down")
+
+    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", always_broken)
+    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", lambda: [])
+    gateway._command_poller()
+
+    # 12 failures, reported at the 1st, 5th and 10th — not twelve times.
+    assert capsys.readouterr().out.count("command plane cycle failed") == 3
+
+
+def test_a_failed_ack_delivery_is_persisted_not_dropped(monkeypatch, capsys):
+    """It is already off the queue: the error handling must not lose it."""
+    gateway = bridge.Gateway()
+    saved = []
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "report_command_ack",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("resolver exploded")),
+    )
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "save_command_ack_for_retry",
+        lambda node, cmd_id, result, **kwargs: saved.append((node, cmd_id, result)),
+    )
+    gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C7", "result": "OK"})
+
+    gateway._drain_ack_queue(deliver=True)
+
+    assert saved == [("s03", "C7", "OK")]
+    assert "ACK C7 not delivered" in capsys.readouterr().out
+    assert gateway.ack_queue.empty()

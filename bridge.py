@@ -24,6 +24,8 @@ API_KEY = os.environ.get("LORA_API_KEY", "")
 ACK_QUEUE_SIZE = int(os.environ.get("ACK_QUEUE_SIZE", "128"))
 SHUTDOWN_DRAIN_SECONDS = float(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "10"))
 OUTBOX_FAILURE_LIMIT = int(os.environ.get("OUTBOX_FAILURE_LIMIT", "5"))
+# At the default 5s poll this is roughly one line every five minutes.
+COMMAND_FAILURE_REPORT_EVERY = 60
 MAX_SERIAL_LINE = 8192
 COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
 CACHE_FLUSH_INTERVAL = float(os.environ.get("CACHE_FLUSH_INTERVAL_SECONDS", "30"))
@@ -162,37 +164,46 @@ class Gateway:
             self.ack_queue.put_nowait(ack)
         except queue.Full:
             # Still no network on this thread: a bounded local write instead.
-            gateway_cache.save_command_ack_for_retry(
-                ack["node"],
-                ack["cmd_id"],
-                ack["result"],
-                rssi=ack.get("rssi"),
-                snr=ack.get("snr"),
-            )
+            self._persist_ack(ack)
+
+    def _persist_ack(self, ack: dict[str, Any]) -> None:
+        gateway_cache.save_command_ack_for_retry(
+            ack["node"],
+            ack["cmd_id"],
+            ack["result"],
+            rssi=ack.get("rssi"),
+            snr=ack.get("snr"),
+        )
 
     def _drain_ack_queue(self, *, deliver: bool) -> None:
-        """Report queued ACKs, or persist them when shutting down."""
+        """Report queued ACKs, or persist them when shutting down.
+
+        An ACK leaves the queue the moment it is taken, so a failure past that
+        point has to put it somewhere durable — otherwise the error handling is
+        itself what loses it.
+        """
         while True:
             try:
                 ack = self.ack_queue.get_nowait()
             except queue.Empty:
                 return
-            if deliver:
-                gateway_cache.report_command_ack(
-                    ack["node"],
-                    ack["cmd_id"],
-                    ack["result"],
-                    rssi=ack.get("rssi"),
-                    snr=ack.get("snr"),
-                )
-            else:
-                gateway_cache.save_command_ack_for_retry(
-                    ack["node"],
-                    ack["cmd_id"],
-                    ack["result"],
-                    rssi=ack.get("rssi"),
-                    snr=ack.get("snr"),
-                )
+            try:
+                if deliver:
+                    gateway_cache.report_command_ack(
+                        ack["node"],
+                        ack["cmd_id"],
+                        ack["result"],
+                        rssi=ack.get("rssi"),
+                        snr=ack.get("snr"),
+                    )
+                else:
+                    self._persist_ack(ack)
+            except Exception as exc:
+                print(f"WARNING: ACK {ack.get('cmd_id')} not delivered: {exc}")
+                try:
+                    self._persist_ack(ack)
+                except Exception as inner:
+                    print(f"CRITICAL: lost ACK {ack.get('cmd_id')}: {inner}")
 
     def _consume(self, buffer: bytearray, chunk: bytes) -> bytearray:
         """Append ``chunk`` and dispatch every line it completes.
@@ -237,15 +248,41 @@ class Gateway:
         print(f"WARNING: dropped packets so far: {summary}")
 
     def _command_poller(self) -> None:
+        """Run the whole command plane: ACK delivery and retries, command
+        polling and dispatch.
+
+        One escaping exception used to end this thread outright, and with it
+        every command and every acknowledgement for the rest of the run —
+        nothing in the log, nothing in /healthz, and the dashboard still showing
+        commands as 'sent'. Failures are contained per cycle instead.
+
+        They are deliberately not fatal. Telemetry is the gateway's job and does
+        not pass through here, so a broken command plane is a degraded gateway,
+        not a dead one.
+        """
+        failures = 0
         while not self.stop_event.is_set():
-            self._drain_ack_queue(deliver=True)
-            gateway_cache.flush_command_acks()
-            for command in gateway_cache.fetch_pending_commands():
-                self._dispatch_command(command)
+            try:
+                self._drain_ack_queue(deliver=True)
+                gateway_cache.flush_command_acks()
+                for command in gateway_cache.fetch_pending_commands():
+                    self._dispatch_command(command)
+                failures = 0
+            except Exception as exc:
+                failures += 1
+                # First one in full, then on a slow cadence: this cycle runs
+                # every few seconds and a stuck fault would bury the log.
+                if failures == 1 or failures % COMMAND_FAILURE_REPORT_EVERY == 0:
+                    print(
+                        f"WARNING: command plane cycle failed ({failures}x): {exc}"
+                    )
             self.stop_event.wait(COMMAND_POLL_INTERVAL)
         # Shutting down: persist rather than block on the network, so anything
         # still in flight is picked up from SQLite on the next run.
-        self._drain_ack_queue(deliver=False)
+        try:
+            self._drain_ack_queue(deliver=False)
+        except Exception as exc:
+            print(f"CRITICAL: could not persist queued ACKs: {exc}")
 
     def _dispatch_command(self, command: dict[str, Any]) -> None:
         """Write one claimed command to serial, or say plainly that it did not.
