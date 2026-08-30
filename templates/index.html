@@ -63,12 +63,30 @@
 <script>
 "use strict";
 const META_FIELDS=["rssi","snr","hop_rssi","hop_snr","mcount","loss","via","level","fallback"];
+// Sensors with different units must not share a Y axis. On one scale CO2 in the
+// hundreds sets the range and flattens temperature and humidity into a line
+// along the bottom, which hides exactly the variation the chart is for. One
+// axis per unit instead, so every series is scaled against its own range.
+const SENSOR_UNITS={temperature:"°C",humidity:"%",co2:"ppm",pm25:"µg/m³",pm10:"µg/m³",voltage:"V"};
+const AXIS_LIMIT=4;  // past this the axis gutters cost more than they explain
+const TICK="#718096",GRID="#243244",LABEL="#d1d8e0";
+function unitOf(sensor){return SENSOR_UNITS[sensor]||"";}
+function axisOf(sensor){return unitOf(sensor)||sensor;}
 let activeNode=null,pollTimer=null,retryDelay=2000;
 const errorBox=document.getElementById("error"),grid=document.getElementById("grid"),statusBadge=document.getElementById("system-status"),chartPanel=document.getElementById("chart-panel"),chartTitle=document.getElementById("chart-title");
 // A blocked/failed CDN script must not take the live dashboard down with it,
 // so every use of Chart/XLSX is guarded and the rest of the page keeps working.
 const chartReady=typeof Chart==="function",xlsxReady=typeof XLSX==="object"&&XLSX!==null;
-const chart=chartReady?new Chart(document.getElementById("chart"),{type:"line",data:{labels:[],datasets:[]},options:{responsive:true,maintainAspectRatio:false,spanGaps:false}}):null;
+const chart=chartReady?new Chart(document.getElementById("chart"),{type:"line",data:{labels:[],datasets:[]},options:{
+  responsive:true,maintainAspectRatio:false,spanGaps:false,
+  // One hover reads every series at that timestamp, which is how you compare
+  // them once they no longer share a scale.
+  interaction:{mode:"index",intersect:false},
+  plugins:{
+    legend:{labels:{color:LABEL,boxWidth:12}},
+    tooltip:{callbacks:{label:item=>` ${item.dataset.label}: ${item.formattedValue}`}},
+  },
+}}):null;
 function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=String(text);return node;}
 function valueCell(parent,label,value){const box=element("div");box.append(element("div","label",label),element("div","value",value??"--"));parent.append(box);}
 function formatTime(epoch){return Number.isFinite(epoch)?new Date(epoch*1000).toLocaleString("zh-TW",{hour12:false}):"--";}
@@ -83,7 +101,41 @@ function renderCards(response){
   }
   const online=response.status==="online";statusBadge.className=`badge${online?" online":""}`;statusBadge.textContent=online?"SYSTEM.ONLINE":"SYSTEM.OFFLINE";
 }
-function renderChart(history){if(!chart)return;chart.data.labels=history.labels||[];chart.data.datasets=Object.keys(history).filter(key=>key!=="labels").map((key,index)=>({label:key.toUpperCase(),data:(history[key]||[]).map(value=>value===null||value===undefined?null:Number(value)),borderColor:`hsl(${(index*83)%360} 80% 60%)`,backgroundColor:`hsl(${(index*83)%360} 80% 60%)`,tension:.25}));chart.update();}
+function renderChart(history){
+  if(!chart)return;
+  chart.data.labels=history.labels||[];
+  const keys=Object.keys(history).filter(key=>key!=="labels");
+  const axes=[...new Set(keys.map(axisOf))];
+  const scales={x:{ticks:{color:TICK,maxTicksLimit:10},grid:{color:GRID}}};
+  axes.forEach((axis,index)=>{
+    const shown=index<AXIS_LIMIT;
+    scales[`y${index}`]={
+      type:"linear",
+      position:index%2?"right":"left",
+      display:shown,
+      title:{display:shown,text:axis,color:TICK},
+      ticks:{color:TICK},
+      // Only the first axis draws horizontal lines; stacking them turns the
+      // plot into a grey wash.
+      grid:{drawOnChartArea:index===0,color:GRID},
+    };
+  });
+  chart.data.datasets=keys.map((key,index)=>{
+    const unit=unitOf(key);
+    return {
+      label:unit?`${key.toUpperCase()} (${unit})`:key.toUpperCase(),
+      yAxisID:`y${axes.indexOf(axisOf(key))}`,
+      data:(history[key]||[]).map(value=>value===null||value===undefined?null:Number(value)),
+      borderColor:`hsl(${(index*83)%360} 80% 60%)`,
+      backgroundColor:`hsl(${(index*83)%360} 80% 60%)`,
+      tension:.25,
+      pointRadius:0,
+      pointHitRadius:8,
+    };
+  });
+  chart.options.scales=scales;
+  chart.update();
+}
 function showError(message){errorBox.textContent=`資料連線錯誤：${message}`;errorBox.style.display="block";statusBadge.className="badge";statusBadge.textContent="SYSTEM.ERROR";}
 async function openChart(id){activeNode=id;chartTitle.textContent=chartReady?id.toUpperCase():`${id.toUpperCase()}（圖表元件載入失敗,僅顯示指令面板）`;chartPanel.style.display="block";cmdStatus.textContent="";loadCommandLog();if(!chartReady)return;try{const response=await fetch(`/api/history_range/${encodeURIComponent(id)}?days=7`);if(!response.ok)throw new Error(`History HTTP ${response.status}`);renderChart(await response.json());}catch(error){showError(error.message);}}
 async function poll(){try{const response=await fetch("/api/all_data",{cache:"no-store"});if(!response.ok)throw new Error(`HTTP ${response.status}`);renderCards(await response.json());errorBox.style.display="none";retryDelay=2000;pollTimer=setTimeout(poll,3000);}catch(error){showError(error.message);pollTimer=setTimeout(poll,retryDelay);retryDelay=Math.min(retryDelay*2,30000);}}
