@@ -108,6 +108,59 @@ def test_restart_with_boot_id_is_announced_and_kept(capsys):
     assert gateway.dropped == {}
 
 
+def test_oversized_burst_keeps_the_complete_lines(capsys):
+    gateway = bridge.Gateway()
+    handled = []
+    gateway._handle_line = handled.append
+
+    # One read carrying far more than MAX_SERIAL_LINE, but only whole lines.
+    burst = b"".join(
+        f"數據: s10_m{n}, t, 25.0, h, 60.0\n".encode("utf-8") for n in range(1, 300)
+    )
+    assert len(burst) > bridge.MAX_SERIAL_LINE
+    leftover = gateway._consume(bytearray(), burst)
+
+    # The cap is about one runaway line, not about the size of a healthy burst.
+    assert len(handled) == 299
+    assert leftover == bytearray()
+    assert "oversized" not in capsys.readouterr().out
+
+
+def test_oversized_line_is_dropped_without_taking_its_neighbours(capsys):
+    gateway = bridge.Gateway()
+    handled = []
+    gateway._handle_line = handled.append
+
+    garbage = b"x" * (bridge.MAX_SERIAL_LINE + 1)
+    chunk = (
+        "數據: s10_m1, t, 25.0\n".encode("utf-8")
+        + garbage
+        + "\n數據: s10_m2, t, 26.0\n".encode("utf-8")
+    )
+    leftover = gateway._consume(bytearray(), chunk)
+
+    assert handled == ["數據: s10_m1, t, 25.0", "數據: s10_m2, t, 26.0"]
+    assert leftover == bytearray()
+    assert "oversized serial line discarded" in capsys.readouterr().out
+
+
+def test_oversized_fragment_is_cleared_across_reads(capsys):
+    gateway = bridge.Gateway()
+    handled = []
+    gateway._handle_line = handled.append
+
+    # A run with no newline in sight, split over several reads, must not grow
+    # without bound — but must also not be handed on once it finally terminates.
+    buffer = bytearray()
+    for _ in range(3):
+        buffer = gateway._consume(buffer, b"x" * 4096)
+    assert len(buffer) <= bridge.MAX_SERIAL_LINE
+    assert "oversized serial line fragment discarded" in capsys.readouterr().out
+
+    buffer = gateway._consume(buffer, "tail\n數據: s10_m9, t, 25.0\n".encode("utf-8"))
+    assert handled[-1] == "數據: s10_m9, t, 25.0"
+
+
 def test_uploader_reports_success(monkeypatch, capsys):
     gateway = bridge.Gateway()
     payload = {"data": {"temperature": 25.0}, "meta": {"mcount": 7}}

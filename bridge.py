@@ -118,6 +118,29 @@ class Gateway:
             return
         print(f"WARNING: ignored LoRa payload ({status}): {raw[:200]}")
 
+    def _consume(self, buffer: bytearray, chunk: bytes) -> bytearray:
+        """Append ``chunk`` and dispatch every line it completes.
+
+        The length cap bounds a single runaway line, so it is applied per line
+        and to the trailing fragment. Applying it to the whole buffer instead
+        threw away the completed packets queued in front of the garbage: one
+        read carrying a long unterminated run plus good lines discarded the lot.
+        """
+        buffer.extend(chunk)
+        while b"\n" in buffer:
+            raw_line, _, remainder = buffer.partition(b"\n")
+            buffer = bytearray(remainder)
+            if len(raw_line) > MAX_SERIAL_LINE:
+                # Never hand this to _handle_line: parse_payload splits on every
+                # comma and de-duplicates via routes in O(n^2), on this thread.
+                print("WARNING: oversized serial line discarded")
+                continue
+            self._handle_line(raw_line.decode("utf-8", errors="ignore").strip())
+        if len(buffer) > MAX_SERIAL_LINE:
+            print("WARNING: oversized serial line fragment discarded")
+            buffer.clear()
+        return buffer
+
     def _record_drop(self, node: str | None, status: str, raw: str) -> None:
         """Tally a discarded packet and summarise it on a slow cadence.
 
@@ -218,15 +241,7 @@ class Gateway:
                     break
                 if not chunk:
                     continue
-                buffer.extend(chunk)
-                if len(buffer) > MAX_SERIAL_LINE:
-                    print("WARNING: oversized serial line discarded")
-                    buffer.clear()
-                    continue
-                while b"\n" in buffer:
-                    raw_line, _, remainder = buffer.partition(b"\n")
-                    buffer = bytearray(remainder)
-                    self._handle_line(raw_line.decode("utf-8", errors="ignore").strip())
+                buffer = self._consume(buffer, chunk)
             if buffer:
                 self._handle_line(buffer.decode("utf-8", errors="ignore").strip())
         except serial.SerialException as exc:

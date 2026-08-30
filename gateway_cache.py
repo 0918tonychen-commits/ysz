@@ -19,6 +19,8 @@ _max_dead_letter = 500
 _flush_batch = 10
 _flush_lock = threading.Lock()
 _ack_flush_lock = threading.Lock()
+_init_lock = threading.Lock()
+_initialized_db: str | None = None
 
 TEMPORARY_STATUSES = {408, 425, 429}
 PERMANENT_STATUSES = {400, 401, 403, 404, 415, 422}
@@ -47,6 +49,35 @@ def configure(
 
 
 def init_local_cache() -> None:
+    """Create and migrate the schema once per database path.
+
+    Every cache operation calls this, so it has to be free on the hot path: it
+    used to re-run the whole DDL and a full-table backfill on each call, ~21ms
+    with the cache at its 5000-row cap — paid on the serial reader thread
+    whenever the upload queue was full. The guard is keyed on ``_local_db`` so
+    ``configure`` pointing at another database still re-runs it.
+    """
+    global _initialized_db
+    if _initialized_db == _local_db:
+        return
+    with _init_lock:
+        if _initialized_db == _local_db:  # another thread won the race
+            return
+        _init_schema()
+        _initialized_db = _local_db
+
+
+def _invalidate_schema_cache() -> None:
+    """Re-run the schema check after a SQLite failure.
+
+    Without this the guard above would turn a recoverable state — the database
+    file deleted or replaced under a running gateway — into a permanent one.
+    """
+    global _initialized_db
+    _initialized_db = None
+
+
+def _init_schema() -> None:
     with _connect() as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS cache (
@@ -77,9 +108,12 @@ def init_local_cache() -> None:
             row[1] for row in conn.execute("PRAGMA table_info(cache)").fetchall()
         }
         timestamp_source = "timestamp" if "timestamp" in columns else "NULL"
+        # Filtered, not blanket: without the WHERE this rewrote every row on
+        # every call even when there was nothing left to backfill.
         conn.execute(
             "UPDATE cache SET event_id=COALESCE(event_id,'legacy-'||id), "
-            f"recorded_at=COALESCE(recorded_at,{timestamp_source},strftime('%s','now'))"
+            f"recorded_at=COALESCE(recorded_at,{timestamp_source},strftime('%s','now')) "
+            "WHERE event_id IS NULL OR recorded_at IS NULL"
         )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_event_id ON cache(event_id)"
@@ -204,6 +238,7 @@ def save_to_local_cache(
                 print(f"WARNING: dead-letter limit exceeded; dropped {drop} oldest quarantined events")
         return True
     except sqlite3.Error as exc:
+        _invalidate_schema_cache()
         print(f"CRITICAL: SQLite cache write failed: {exc}")
         return False
 
@@ -311,6 +346,7 @@ def _save_command_ack(
                     ORDER BY created_at DESC LIMIT -1 OFFSET 500)"""
             )
     except sqlite3.Error as exc:
+        _invalidate_schema_cache()
         print(f"CRITICAL: command ACK cache write failed: {exc}")
 
 
@@ -320,6 +356,7 @@ def _delete_command_ack(cmd_id: str) -> None:
         with _connect() as conn:
             conn.execute("DELETE FROM command_ack_cache WHERE cmd_id=?", (cmd_id,))
     except sqlite3.Error as exc:
+        _invalidate_schema_cache()
         print(f"WARNING: command ACK cache cleanup failed: {exc}")
 
 
@@ -337,6 +374,7 @@ def flush_command_acks() -> int:
                     (time.time(),),
                 ).fetchall()
         except sqlite3.Error as exc:
+            _invalidate_schema_cache()
             print(f"WARNING: command ACK cache read failed: {exc}")
             return 0
         sent = 0
