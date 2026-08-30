@@ -254,3 +254,62 @@ def test_legacy_database_is_migrated_and_the_backfill_is_idempotent(tmp_path):
         assert conn.execute(
             "SELECT node_id,event_id,recorded_at FROM cache ORDER BY id"
         ).fetchall() == migrated
+
+
+def test_backlog_flush_failure_does_not_cost_the_current_event(tmp_path, monkeypatch):
+    """A SQLite fault in the backlog says nothing about the event being sent."""
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+
+    def broken_flush():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(gateway_cache, "flush_local_cache", broken_flush)
+    posted = []
+    monkeypatch.setattr(
+        gateway_cache.requests,
+        "post",
+        lambda *args, **kwargs: posted.append(kwargs.get("json")) or Response(204),
+    )
+
+    # The backend is healthy, so the event must still be delivered.
+    assert gateway_cache.upload_telemetry(
+        "s05", {"data": {"t": 25.0}, "meta": {}}, event_id="survives-0001"
+    )
+    assert len(posted) == 1
+    assert posted[0]["event_id"] == "survives-0001"
+
+
+def test_backlog_flush_failure_still_falls_back_to_the_cache(tmp_path, monkeypatch):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+    monkeypatch.setattr(
+        gateway_cache,
+        "flush_local_cache",
+        lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+    )
+    def fail(*args, **kwargs):
+        raise gateway_cache.requests.Timeout("offline")
+
+    monkeypatch.setattr(gateway_cache.requests, "post", fail)
+
+    # Backend down as well: the event belongs in the cache, not in a traceback.
+    assert not gateway_cache.upload_telemetry(
+        "s05", {"data": {"t": 25.0}, "meta": {}}, event_id="cached-0001"
+    )
+    assert gateway_cache.cache_count() == 1
+
+
+def test_queued_ack_is_due_immediately_and_spends_no_retry(tmp_path):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+
+    gateway_cache.save_command_ack_for_retry("s03", "C1", "OK", rssi=-65, snr=6.1)
+
+    with sqlite3.connect(database) as conn:
+        retries, next_attempt = conn.execute(
+            "SELECT retries,next_attempt FROM command_ack_cache WHERE cmd_id='C1'"
+        ).fetchone()
+    # It has not failed at anything yet, so no backoff and no attempt spent.
+    assert retries == 0
+    assert next_attempt == 0.0

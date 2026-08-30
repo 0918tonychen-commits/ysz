@@ -9,6 +9,8 @@ the nodes also went quiet. ``Gateway._cache_flusher`` covers that gap.
 import sys
 import types
 
+import pytest
+
 # bridge.py imports pyserial at module scope; the flusher never touches it, so a
 # stub keeps this test independent of a real serial port (and of the package).
 if "serial" not in sys.modules:
@@ -18,6 +20,63 @@ if "serial" not in sys.modules:
     sys.modules["serial"] = stub
 
 import bridge  # noqa: E402
+
+
+class _NoopThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        pass
+
+    def join(self, timeout=None):
+        pass
+
+
+def _prepare_run(monkeypatch):
+    monkeypatch.setattr(bridge.gateway_cache, "configure", lambda *args: None)
+    monkeypatch.setattr(bridge.gateway_cache, "cache_count", lambda: 0)
+    monkeypatch.setattr(bridge.gateway_cache, "dead_letter_count", lambda: 0)
+    monkeypatch.setattr(bridge.threading, "Thread", _NoopThread)
+
+
+def test_serial_failure_propagates_for_service_restart(monkeypatch, capsys):
+    _prepare_run(monkeypatch)
+
+    def fail_to_open(*args, **kwargs):
+        raise bridge.serial.SerialException("port unavailable")
+
+    monkeypatch.setattr(bridge.serial, "Serial", fail_to_open)
+
+    with pytest.raises(bridge.serial.SerialException, match="port unavailable"):
+        bridge.Gateway().run()
+
+    assert "CRITICAL: serial connection failed" in capsys.readouterr().out
+
+
+def test_delivery_failure_propagates_for_service_restart(monkeypatch):
+    _prepare_run(monkeypatch)
+
+    class OneLineSerial:
+        is_open = False
+        in_waiting = 1
+
+        def read(self, size):
+            return b"packet\n"
+
+    monkeypatch.setattr(bridge.serial, "Serial", lambda *args, **kwargs: OneLineSerial())
+    gateway = bridge.Gateway()
+
+    def fail_delivery(line):
+        raise bridge.gateway_cache.TelemetryDeliveryError("queue and cache unavailable")
+
+    monkeypatch.setattr(gateway, "_handle_line", fail_delivery)
+
+    with pytest.raises(
+        bridge.gateway_cache.TelemetryDeliveryError,
+        match="queue and cache unavailable",
+    ):
+        gateway.run()
 
 
 def test_flusher_drains_backlog_while_no_packets_arrive(monkeypatch):
@@ -187,3 +246,70 @@ def test_uploader_reports_sqlite_fallback(monkeypatch, capsys):
     gateway._uploader()
 
     assert "CACHED: node=s03 mcount=8 waiting for retry" in capsys.readouterr().out
+
+
+# --- the reader thread must never wait on the network -------------------------
+
+def test_ack_does_not_block_the_reader_on_http(monkeypatch):
+    """An ACK used to cost the reader a full HTTP timeout of serial silence."""
+    gateway = bridge.Gateway()
+    reported = []
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "report_command_ack",
+        lambda *args, **kwargs: reported.append(args) or True,
+    )
+
+    gateway._handle_line("【ACK】from=s03, cmdId=C001, result=OK, rssi=-65, snr=6.1")
+
+    # Queued, not sent: nothing touched the network on this thread.
+    assert reported == []
+    assert gateway.ack_queue.qsize() == 1
+
+    gateway._drain_ack_queue(deliver=True)
+    assert reported == [("s03", "C001", "OK")]
+    assert gateway.ack_queue.empty()
+
+
+def test_ack_queue_overflow_persists_instead_of_posting(monkeypatch):
+    gateway = bridge.Gateway()
+    saved = []
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "report_command_ack",
+        lambda *a, **k: pytest.fail("the reader thread must not post"),
+    )
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "save_command_ack_for_retry",
+        lambda node, cmd_id, result, **kwargs: saved.append((node, cmd_id, result)),
+    )
+    for _ in range(bridge.ACK_QUEUE_SIZE):
+        gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C0", "result": "OK"})
+
+    gateway._handle_line("【ACK】from=s03, cmdId=C999, result=OK")
+
+    assert saved == [("s03", "C999", "OK")]
+
+
+def test_poller_persists_queued_acks_on_shutdown(monkeypatch):
+    gateway = bridge.Gateway()
+    saved = []
+    monkeypatch.setattr(
+        bridge.gateway_cache, "flush_command_acks", lambda: 0
+    )
+    monkeypatch.setattr(
+        bridge.gateway_cache, "fetch_pending_commands", lambda: []
+    )
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "save_command_ack_for_retry",
+        lambda node, cmd_id, result, **kwargs: saved.append((node, cmd_id, result)),
+    )
+    gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C7", "result": "OK"})
+    gateway.stop_event.set()
+
+    gateway._command_poller()
+
+    # An ACK still in memory at shutdown becomes durable rather than vanishing.
+    assert saved == [("s03", "C7", "OK")]

@@ -311,6 +311,25 @@ def report_command_ack(
     return False
 
 
+def save_command_ack_for_retry(
+    node: str,
+    cmd_id: str,
+    result: str,
+    *,
+    rssi: int | None = None,
+    snr: float | None = None,
+) -> None:
+    """Persist an ACK for the background poller without spending an attempt.
+
+    For callers that must not block on the network — the serial reader — this
+    makes the acknowledgement durable now and leaves delivery to
+    ``flush_command_acks``, due immediately rather than after a retry backoff.
+    """
+    _save_command_ack(
+        node, cmd_id, result, rssi, snr, "queued for delivery", count_attempt=False
+    )
+
+
 def _save_command_ack(
     node: str,
     cmd_id: str,
@@ -318,6 +337,8 @@ def _save_command_ack(
     rssi: int | None,
     snr: float | None,
     error: str,
+    *,
+    count_attempt: bool = True,
 ) -> None:
     try:
         init_local_cache()
@@ -325,8 +346,15 @@ def _save_command_ack(
             row = conn.execute(
                 "SELECT retries FROM command_ack_cache WHERE cmd_id=?", (cmd_id,)
             ).fetchone()
-            retries = (int(row[0]) if row else 0) + 1
-            retry_delay = min(300.0, 5.0 * (2 ** min(retries - 1, 6)))
+            previous = int(row[0]) if row else 0
+            # A queued-but-never-tried ACK has not failed at anything, so it
+            # neither burns a retry nor waits out a backoff it did not earn.
+            retries = previous + 1 if count_attempt else previous
+            next_attempt = (
+                time.time() + min(300.0, 5.0 * (2 ** min(retries - 1, 6)))
+                if count_attempt
+                else 0.0  # due now, not "now + 0": never race the flush clock
+            )
             conn.execute(
                 """INSERT INTO command_ack_cache
                    (cmd_id,node,result,rssi,snr,created_at,last_error,retries,next_attempt)
@@ -337,7 +365,7 @@ def _save_command_ack(
                      retries=excluded.retries,next_attempt=excluded.next_attempt""",
                 (
                     cmd_id, node, result, rssi, snr, time.time(), error[:500],
-                    retries, time.time() + retry_delay,
+                    retries, next_attempt,
                 ),
             )
             conn.execute(
@@ -454,7 +482,14 @@ def upload_telemetry(
     event_id: str | None = None,
 ) -> bool:
     envelope = _envelope(node_id, payload, recorded_at, event_id)
-    flush_local_cache()
+    # Draining the backlog here is opportunistic, so it is best-effort: it runs
+    # outside the delivery attempt below, and anything it raises — a SQLite
+    # error from the backlog rows, which says nothing about this event — used to
+    # cost this event its one chance at both the network and the cache.
+    try:
+        flush_local_cache()
+    except Exception as exc:
+        print(f"WARNING: backlog flush before upload failed: {exc}")
     try:
         response = _post(envelope, 3.0)
         if 200 <= response.status_code < 300:

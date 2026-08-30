@@ -22,6 +22,7 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "https://ysz.onrender.com/update")
 LOCAL_DB = os.environ.get("GATEWAY_CACHE_DB", "gateway_cache.db")
 API_KEY = os.environ.get("LORA_API_KEY", "")
 QUEUE_SIZE = int(os.environ.get("UPLOAD_QUEUE_SIZE", "256"))
+ACK_QUEUE_SIZE = int(os.environ.get("ACK_QUEUE_SIZE", "128"))
 MAX_SERIAL_LINE = 8192
 COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
 CACHE_FLUSH_INTERVAL = float(os.environ.get("CACHE_FLUSH_INTERVAL_SECONDS", "30"))
@@ -44,10 +45,12 @@ class SerialWriter:
 class Gateway:
     def __init__(self) -> None:
         self.stop_event = threading.Event()
-        self.reader_failed = threading.Event()
         self.upload_queue: queue.Queue[tuple[str, dict[str, Any], float]] = queue.Queue(
             maxsize=QUEUE_SIZE
         )
+        # Acknowledgements take the same decoupled route as telemetry: the
+        # reader thread must never wait on the network. See _queue_ack.
+        self.ack_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=ACK_QUEUE_SIZE)
         self.tracker = MCountTracker()
         self.serial_port: serial.Serial | None = None
         self.serial_writer: SerialWriter | None = None
@@ -91,13 +94,7 @@ class Gateway:
         if "【ACK】" in line:
             ack = parse_ack_line(line)
             if ack:
-                gateway_cache.report_command_ack(
-                    ack["node"],
-                    ack["cmd_id"],
-                    ack["result"],
-                    rssi=ack.get("rssi"),
-                    snr=ack.get("snr"),
-                )
+                self._queue_ack(ack)
             else:
                 print(f"WARNING: malformed ACK line: {line[:200]}")
             return
@@ -117,6 +114,52 @@ class Gateway:
             self._record_drop(node, status, raw)
             return
         print(f"WARNING: ignored LoRa payload ({status}): {raw[:200]}")
+
+    def _queue_ack(self, ack: dict[str, Any]) -> None:
+        """Hand an ACK to the poller thread instead of reporting it inline.
+
+        ``report_command_ack`` makes a synchronous HTTP request. On this thread
+        that is seconds of serial silence — a connect plus read timeout, and DNS
+        on top of it, which no timeout covers. Nothing calls ``read()`` mean-
+        while, so the driver's receive buffer overflows and drops bytes before
+        Python ever sees them: invisible to the drop tally, unlike every other
+        loss this gateway records.
+        """
+        try:
+            self.ack_queue.put_nowait(ack)
+        except queue.Full:
+            # Still no network on this thread: a bounded local write instead.
+            gateway_cache.save_command_ack_for_retry(
+                ack["node"],
+                ack["cmd_id"],
+                ack["result"],
+                rssi=ack.get("rssi"),
+                snr=ack.get("snr"),
+            )
+
+    def _drain_ack_queue(self, *, deliver: bool) -> None:
+        """Report queued ACKs, or persist them when shutting down."""
+        while True:
+            try:
+                ack = self.ack_queue.get_nowait()
+            except queue.Empty:
+                return
+            if deliver:
+                gateway_cache.report_command_ack(
+                    ack["node"],
+                    ack["cmd_id"],
+                    ack["result"],
+                    rssi=ack.get("rssi"),
+                    snr=ack.get("snr"),
+                )
+            else:
+                gateway_cache.save_command_ack_for_retry(
+                    ack["node"],
+                    ack["cmd_id"],
+                    ack["result"],
+                    rssi=ack.get("rssi"),
+                    snr=ack.get("snr"),
+                )
 
     def _consume(self, buffer: bytearray, chunk: bytes) -> bytearray:
         """Append ``chunk`` and dispatch every line it completes.
@@ -181,10 +224,14 @@ class Gateway:
 
     def _command_poller(self) -> None:
         while not self.stop_event.is_set():
+            self._drain_ack_queue(deliver=True)
             gateway_cache.flush_command_acks()
             for command in gateway_cache.fetch_pending_commands():
                 self._dispatch_command(command)
             self.stop_event.wait(COMMAND_POLL_INTERVAL)
+        # Shutting down: persist rather than block on the network, so anything
+        # still in flight is picked up from SQLite on the next run.
+        self._drain_ack_queue(deliver=False)
 
     def _dispatch_command(self, command: dict[str, Any]) -> None:
         if self.serial_writer is None:
@@ -233,20 +280,15 @@ class Gateway:
             poller.start()
             buffer = bytearray()
             while not self.stop_event.is_set():
-                try:
-                    chunk = self.serial_port.read(self.serial_port.in_waiting or 1)
-                except serial.SerialException as exc:
-                    self.reader_failed.set()
-                    print(f"CRITICAL: serial reader stopped: {exc}")
-                    break
+                chunk = self.serial_port.read(self.serial_port.in_waiting or 1)
                 if not chunk:
                     continue
                 buffer = self._consume(buffer, chunk)
             if buffer:
                 self._handle_line(buffer.decode("utf-8", errors="ignore").strip())
         except serial.SerialException as exc:
-            self.reader_failed.set()
-            print(f"CRITICAL: unable to open serial port: {exc}")
+            print(f"CRITICAL: serial connection failed: {exc}")
+            raise
         except KeyboardInterrupt:
             print("Gateway shutdown requested")
         finally:
