@@ -74,9 +74,14 @@ class Gateway:
             except queue.Empty:
                 continue
             try:
-                gateway_cache.upload_telemetry(
+                uploaded = gateway_cache.upload_telemetry(
                     node, payload, recorded_at=recorded_at
                 )
+                mcount = payload.get("meta", {}).get("mcount", "?")
+                if uploaded:
+                    print(f"UPLOADED: node={node} mcount={mcount}")
+                else:
+                    print(f"CACHED: node={node} mcount={mcount} waiting for retry")
             except Exception as exc:
                 print(f"CRITICAL: telemetry delivery failed: {exc}")
             finally:

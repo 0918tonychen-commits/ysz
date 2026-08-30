@@ -106,3 +106,31 @@ def test_restart_with_boot_id_is_announced_and_kept(capsys):
     # not be discarded as an out-of-order counter.
     assert gateway.upload_queue.qsize() == 2
     assert gateway.dropped == {}
+
+
+def test_uploader_reports_success(monkeypatch, capsys):
+    gateway = bridge.Gateway()
+    payload = {"data": {"temperature": 25.0}, "meta": {"mcount": 7}}
+    gateway.upload_queue.put(("s03", payload, 1000.0))
+    gateway.stop_event.set()
+    monkeypatch.setattr(
+        bridge.gateway_cache, "upload_telemetry", lambda *args, **kwargs: True
+    )
+
+    gateway._uploader()
+
+    assert "UPLOADED: node=s03 mcount=7" in capsys.readouterr().out
+
+
+def test_uploader_reports_sqlite_fallback(monkeypatch, capsys):
+    gateway = bridge.Gateway()
+    payload = {"data": {"temperature": 25.0}, "meta": {"mcount": 8}}
+    gateway.upload_queue.put(("s03", payload, 1000.0))
+    gateway.stop_event.set()
+    monkeypatch.setattr(
+        bridge.gateway_cache, "upload_telemetry", lambda *args, **kwargs: False
+    )
+
+    gateway._uploader()
+
+    assert "CACHED: node=s03 mcount=8 waiting for retry" in capsys.readouterr().out
