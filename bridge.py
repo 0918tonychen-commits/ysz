@@ -23,6 +23,7 @@ LOCAL_DB = os.environ.get("GATEWAY_CACHE_DB", "gateway_cache.db")
 API_KEY = os.environ.get("LORA_API_KEY", "")
 QUEUE_SIZE = int(os.environ.get("UPLOAD_QUEUE_SIZE", "256"))
 ACK_QUEUE_SIZE = int(os.environ.get("ACK_QUEUE_SIZE", "128"))
+SHUTDOWN_DRAIN_SECONDS = float(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "10"))
 MAX_SERIAL_LINE = 8192
 COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
 CACHE_FLUSH_INTERVAL = float(os.environ.get("CACHE_FLUSH_INTERVAL_SECONDS", "30"))
@@ -45,6 +46,13 @@ class SerialWriter:
 class Gateway:
     def __init__(self) -> None:
         self.stop_event = threading.Event()
+        # Any thread may declare the gateway unrecoverable; run() reads this to
+        # pick the exit code. A worker cannot just re-raise: an exception on a
+        # non-main thread leaves the process status at 0, and killing the
+        # uploader strands upload_queue.join() on task_done calls that will
+        # never come. See _fail_fatally.
+        self.fatal_reason: str | None = None
+        self._fatal_lock = threading.Lock()
         self.upload_queue: queue.Queue[tuple[str, dict[str, Any], float]] = queue.Queue(
             maxsize=QUEUE_SIZE
         )
@@ -70,6 +78,20 @@ class Gateway:
                     "upload queue full and SQLite fallback failed"
                 )
 
+    def _fail_fatally(self, reason: str) -> None:
+        """Declare an unrecoverable condition and begin an orderly shutdown.
+
+        Safe to call from any thread. The first reason wins, so the cause is
+        reported rather than whatever failed downstream of it while stopping.
+        """
+        with self._fatal_lock:
+            first = self.fatal_reason is None
+            if first:
+                self.fatal_reason = reason
+        if first:
+            print(f"CRITICAL: {reason}; shutting down for a restart")
+        self.stop_event.set()
+
     def _uploader(self) -> None:
         while not self.stop_event.is_set() or not self.upload_queue.empty():
             try:
@@ -85,6 +107,10 @@ class Gateway:
                     print(f"UPLOADED: node={node} mcount={mcount}")
                 else:
                     print(f"CACHED: node={node} mcount={mcount} waiting for retry")
+            except gateway_cache.TelemetryDeliveryError as exc:
+                # Neither the backend nor SQLite will take it. Carrying on would
+                # drop every packet from here to the end of the run, silently.
+                self._fail_fatally(str(exc))
             except Exception as exc:
                 print(f"CRITICAL: telemetry delivery failed: {exc}")
             finally:
@@ -136,6 +162,27 @@ class Gateway:
                 rssi=ack.get("rssi"),
                 snr=ack.get("snr"),
             )
+
+    def _drain_upload_queue_to_cache(self) -> int:
+        """Persist queued events the uploader did not get to before shutdown."""
+        stranded = 0
+        while True:
+            try:
+                node, payload, recorded_at = self.upload_queue.get_nowait()
+            except queue.Empty:
+                return stranded
+            try:
+                if gateway_cache.save_to_local_cache(
+                    node,
+                    payload,
+                    recorded_at=recorded_at,
+                    last_error="gateway shut down before upload",
+                ):
+                    stranded += 1
+                else:
+                    print(f"CRITICAL: lost queued event from {node} on shutdown")
+            finally:
+                self.upload_queue.task_done()
 
     def _drain_ack_queue(self, *, deliver: bool) -> None:
         """Report queued ACKs, or persist them when shutting down."""
@@ -287,20 +334,38 @@ class Gateway:
             if buffer:
                 self._handle_line(buffer.decode("utf-8", errors="ignore").strip())
         except serial.SerialException as exc:
+            # On this thread re-raising is the fail-fast: the traceback exits
+            # non-zero by itself. _fail_fatally exists for the threads where it
+            # cannot — see _uploader. TelemetryDeliveryError from enqueue is
+            # deliberately left to propagate the same way.
             print(f"CRITICAL: serial connection failed: {exc}")
             raise
         except KeyboardInterrupt:
             print("Gateway shutdown requested")
         finally:
             self.stop_event.set()
-            self.upload_queue.join()
-            uploader.join(timeout=5)
+            # Bounded: upload_queue.join() waits on task_done forever, so a dead
+            # uploader used to hang shutdown outright. Give it a window, then
+            # put whatever is left somewhere durable instead of losing it.
+            uploader.join(timeout=SHUTDOWN_DRAIN_SECONDS)
+            if uploader.is_alive():
+                print(
+                    f"WARNING: uploader still working after {SHUTDOWN_DRAIN_SECONDS}s"
+                )
+            stranded = self._drain_upload_queue_to_cache()
+            if stranded:
+                print(f"Persisted {stranded} events that had not been uploaded yet")
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
 
 
 def main() -> None:
-    Gateway().run()
+    gateway = Gateway()
+    gateway.run()
+    if gateway.fatal_reason:
+        # Non-zero so a service manager restarts us. A clean Ctrl-C, and a
+        # serial port that simply went away, are now told apart by this alone.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

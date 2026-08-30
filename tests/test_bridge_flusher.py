@@ -32,6 +32,9 @@ class _NoopThread:
     def join(self, timeout=None):
         pass
 
+    def is_alive(self):
+        return False
+
 
 def _prepare_run(monkeypatch):
     monkeypatch.setattr(bridge.gateway_cache, "configure", lambda *args: None)
@@ -313,3 +316,68 @@ def test_poller_persists_queued_acks_on_shutdown(monkeypatch):
 
     # An ACK still in memory at shutdown becomes durable rather than vanishing.
     assert saved == [("s03", "C7", "OK")]
+
+
+# --- coordinated fail-fast ----------------------------------------------------
+
+def test_uploader_declares_fatal_instead_of_swallowing(monkeypatch, capsys):
+    """Both sinks gone is unrecoverable: stop, do not drop the rest silently."""
+    gateway = bridge.Gateway()
+    gateway.upload_queue.put(("s03", {"data": {"t": 1.0}, "meta": {}}, 1000.0))
+    gateway.stop_event.set()
+
+    def both_sinks_gone(*args, **kwargs):
+        raise bridge.gateway_cache.TelemetryDeliveryError(
+            "upload failed (HTTP 500) and telemetry could not be cached"
+        )
+
+    monkeypatch.setattr(bridge.gateway_cache, "upload_telemetry", both_sinks_gone)
+    gateway._uploader()
+
+    assert gateway.fatal_reason is not None
+    assert "could not be cached" in gateway.fatal_reason
+    assert "shutting down" in capsys.readouterr().out
+    # The thread stayed alive long enough to finish the item it had taken, so
+    # nothing is left waiting on a task_done that will never arrive.
+    assert gateway.upload_queue.unfinished_tasks == 0
+
+
+def test_recoverable_upload_error_is_not_fatal(monkeypatch):
+    gateway = bridge.Gateway()
+    gateway.upload_queue.put(("s03", {"data": {"t": 1.0}, "meta": {}}, 1000.0))
+    gateway.stop_event.set()
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "upload_telemetry",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("transient")),
+    )
+    gateway._uploader()
+
+    assert gateway.fatal_reason is None  # keep running; only the packet is lost
+
+
+def test_first_fatal_reason_wins(capsys):
+    gateway = bridge.Gateway()
+    gateway._fail_fatally("serial connection failed: port gone")
+    gateway._fail_fatally("something that broke while stopping")
+
+    assert gateway.fatal_reason == "serial connection failed: port gone"
+    assert capsys.readouterr().out.count("shutting down") == 1
+    assert gateway.stop_event.is_set()
+
+
+def test_shutdown_persists_events_the_uploader_never_took(monkeypatch):
+    gateway = bridge.Gateway()
+    saved = []
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "save_to_local_cache",
+        lambda node, payload, **kwargs: saved.append((node, kwargs["recorded_at"])) or True,
+    )
+    for number in range(3):
+        gateway.upload_queue.put(("s03", {"data": {"t": 1.0}, "meta": {}}, float(number)))
+
+    assert gateway._drain_upload_queue_to_cache() == 3
+    assert saved == [("s03", 0.0), ("s03", 1.0), ("s03", 2.0)]
+    # join() can now return: every taken item was accounted for.
+    assert gateway.upload_queue.unfinished_tasks == 0
