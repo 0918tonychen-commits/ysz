@@ -381,3 +381,60 @@ def test_shutdown_persists_events_the_uploader_never_took(monkeypatch):
     assert saved == [("s03", 0.0), ("s03", 1.0), ("s03", 2.0)]
     # join() can now return: every taken item was accounted for.
     assert gateway.upload_queue.unfinished_tasks == 0
+
+
+def test_serial_write_failure_is_reported_not_just_logged(monkeypatch):
+    """The backend already marked it 'sent'; silence would leave that lie."""
+    gateway = bridge.Gateway()
+    reported = []
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "report_dispatch_failure",
+        lambda node, cmd_id, reason: reported.append((node, cmd_id, reason)),
+    )
+
+    class DeadPort:
+        def write_line(self, line):
+            raise bridge.serial.SerialException("port unavailable")
+
+    gateway.serial_writer = DeadPort()
+    gateway._dispatch_command(
+        {"cmd_id": "Cabc", "node": "s03", "cmd": "REBOOT", "arg": ""}
+    )
+
+    assert reported == [("s03", "Cabc", "port unavailable")]
+
+
+def test_dispatch_without_a_serial_port_is_reported(monkeypatch):
+    gateway = bridge.Gateway()
+    reported = []
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "report_dispatch_failure",
+        lambda node, cmd_id, reason: reported.append((node, cmd_id, reason)),
+    )
+    gateway.serial_writer = None
+    gateway._dispatch_command({"cmd_id": "Cabc", "node": "s03", "cmd": "PING"})
+
+    assert reported == [("s03", "Cabc", "serial port not open")]
+
+
+def test_successful_dispatch_reports_nothing(monkeypatch):
+    gateway = bridge.Gateway()
+    monkeypatch.setattr(
+        bridge.gateway_cache,
+        "report_dispatch_failure",
+        lambda *a: pytest.fail("a delivered command must not be marked failed"),
+    )
+    written = []
+
+    class Port:
+        def write_line(self, line):
+            written.append(line)
+
+    gateway.serial_writer = Port()
+    gateway._dispatch_command(
+        {"cmd_id": "Cabc", "node": "s03", "cmd": "SET_LEVEL", "arg": "2"}
+    )
+
+    assert written == ["CMD Cabc s03 SET_LEVEL 2"]

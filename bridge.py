@@ -281,8 +281,14 @@ class Gateway:
         self._drain_ack_queue(deliver=False)
 
     def _dispatch_command(self, command: dict[str, Any]) -> None:
-        if self.serial_writer is None:
-            return
+        """Write one claimed command to serial, or say plainly that it did not.
+
+        /api/commands/pending marks a command 'sent' when it hands it over, so
+        every exit from here that is not a successful write leaves the operator
+        watching a command that was never transmitted. Delivery stays
+        at-most-once — nothing is requeued, since REBOOT and PROMOTE/DEMOTE are
+        not safe to repeat until the node de-duplicates on cmd_id.
+        """
         cmd_id, node, cmd, arg = (
             command.get("cmd_id"),
             command.get("node"),
@@ -290,16 +296,25 @@ class Gateway:
             command.get("arg") or "",
         )
         if not cmd_id or not node or not cmd:
+            # Nothing to report against: without a cmd_id there is no row to fix.
             print(f"WARNING: skipping malformed pending command: {command}")
+            return
+        if self.serial_writer is None:
+            self._report_dispatch_failure(node, cmd_id, "serial port not open")
             return
         line = f"CMD {cmd_id} {node} {cmd}"
         if arg:
             line += f" {arg}"
         try:
             self.serial_writer.write_line(line)
-            print(f"Dispatched command to serial: {line}")
         except (ValueError, serial.SerialException) as exc:
-            print(f"WARNING: failed to dispatch command {cmd_id}: {exc}")
+            self._report_dispatch_failure(node, cmd_id, str(exc))
+            return
+        print(f"Dispatched command to serial: {line}")
+
+    def _report_dispatch_failure(self, node: str, cmd_id: str, reason: str) -> None:
+        print(f"WARNING: failed to dispatch command {cmd_id}: {reason}")
+        gateway_cache.report_dispatch_failure(node, cmd_id, reason)
 
     def run(self) -> None:
         gateway_cache.configure(BACKEND_URL, LOCAL_DB, API_KEY)

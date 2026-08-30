@@ -30,6 +30,8 @@
     #cmd-log{margin-top:10px;font-size:12px;border-collapse:collapse;width:100%}
     #cmd-log td{padding:4px 6px;border-top:1px solid var(--line);color:var(--muted)}
     #cmd-log td.result-OK{color:var(--green)}#cmd-log td.result-ERR{color:var(--red)}
+    #cmd-log td.status-dispatch_failed,#cmd-log td.status-timeout,#cmd-log td.status-expired{color:var(--red)}
+    #cmd-log td.status-acked{color:var(--green)}
   </style>
 </head>
 <body><main>
@@ -104,8 +106,12 @@ async function loadCommandLog(){
       if(c.status==="pending"||c.status==="sent")anyUnresolved=true;
       const tr=document.createElement("tr");
       const resultClass=c.result==null?"":c.result.startsWith("ERR")?"result-ERR":"result-OK";
-      [fmtCmdTime(c.created_at),c.cmd+(c.arg?` ${c.arg}`:""),c.status,c.result??"--"].forEach((text,index)=>{
+      // dispatch_failed means the gateway never got it onto the radio, which is
+      // a different failure from the node not answering; don't blur them.
+      const statusText=c.status==="dispatch_failed"?"未送出":c.status;
+      [fmtCmdTime(c.created_at),c.cmd+(c.arg?` ${c.arg}`:""),statusText,c.result??"--"].forEach((text,index)=>{
         const td=element("td","",text);
+        if(index===2)td.className=`status-${c.status}`;
         if(index===3&&resultClass)td.className=resultClass;
         tr.append(td);
       });

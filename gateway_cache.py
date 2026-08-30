@@ -274,6 +274,33 @@ def fetch_pending_commands(timeout: float = 3.0) -> list[dict[str, Any]]:
     return []
 
 
+def report_dispatch_failure(
+    node: str, cmd_id: str, reason: str, timeout: float = 3.0
+) -> bool:
+    """Tell the backend a claimed command never reached the serial link.
+
+    Best-effort: the backend already expires unacknowledged commands, so a
+    failure here costs a clearer status, not correctness. It is deliberately not
+    persisted for retry — the command is not being redelivered either.
+    """
+    if not _backend_url:
+        return False
+    headers = {"X-API-Key": _api_key} if _api_key else {}
+    try:
+        response = requests.post(
+            f"{_api_base()}/api/commands/dispatch_failed",
+            json={"node": node, "cmd_id": cmd_id, "reason": reason[:200]},
+            headers=headers,
+            timeout=timeout,
+        )
+        if 200 <= response.status_code < 300:
+            return True
+        print(f"WARNING: dispatch failure report rejected: HTTP {response.status_code}")
+    except requests.RequestException as exc:
+        print(f"WARNING: dispatch failure report failed: {exc}")
+    return False
+
+
 def report_command_ack(
     node: str,
     cmd_id: str,
