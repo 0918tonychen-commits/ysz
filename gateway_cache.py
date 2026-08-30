@@ -478,6 +478,12 @@ def flush_local_cache() -> int:
                 with _connect() as conn:
                     conn.execute("DELETE FROM cache WHERE id=?", (row_id,))
                 sent += 1
+                # Per-packet, not per-batch: the console is how an operator sees
+                # a specific mcount make it out, which a count would hide.
+                print(
+                    f"UPLOADED: node={envelope.get('node')} "
+                    f"mcount={envelope.get('meta', {}).get('mcount', '?')}"
+                )
             elif status in PERMANENT_STATUSES:
                 print(
                     f"ERROR: quarantining permanently rejected event row "
@@ -499,39 +505,3 @@ def flush_local_cache() -> int:
         return sent
     finally:
         _flush_lock.release()
-
-
-def upload_telemetry(
-    node_id: str,
-    payload: dict[str, Any],
-    *,
-    recorded_at: float | None = None,
-    event_id: str | None = None,
-) -> bool:
-    envelope = _envelope(node_id, payload, recorded_at, event_id)
-    # Draining the backlog here is opportunistic, so it is best-effort: it runs
-    # outside the delivery attempt below, and anything it raises — a SQLite
-    # error from the backlog rows, which says nothing about this event — used to
-    # cost this event its one chance at both the network and the cache.
-    try:
-        flush_local_cache()
-    except Exception as exc:
-        print(f"WARNING: backlog flush before upload failed: {exc}")
-    try:
-        response = _post(envelope, 3.0)
-        if 200 <= response.status_code < 300:
-            return True
-        error = f"HTTP {response.status_code}"
-    except requests.RequestException as exc:
-        error = str(exc)
-    if not save_to_local_cache(
-        node_id,
-        payload,
-        recorded_at=envelope["recorded_at"],
-        event_id=envelope["event_id"],
-        last_error=error,
-    ):
-        raise TelemetryDeliveryError(
-            f"upload failed ({error}) and telemetry could not be cached"
-        )
-    return False

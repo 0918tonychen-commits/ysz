@@ -21,9 +21,9 @@ BAUD_RATE = int(os.environ.get("LORA_BAUD_RATE", "115200"))
 BACKEND_URL = os.environ.get("BACKEND_URL", "https://ysz.onrender.com/update")
 LOCAL_DB = os.environ.get("GATEWAY_CACHE_DB", "gateway_cache.db")
 API_KEY = os.environ.get("LORA_API_KEY", "")
-QUEUE_SIZE = int(os.environ.get("UPLOAD_QUEUE_SIZE", "256"))
 ACK_QUEUE_SIZE = int(os.environ.get("ACK_QUEUE_SIZE", "128"))
 SHUTDOWN_DRAIN_SECONDS = float(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "10"))
+OUTBOX_FAILURE_LIMIT = int(os.environ.get("OUTBOX_FAILURE_LIMIT", "5"))
 MAX_SERIAL_LINE = 8192
 COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
 CACHE_FLUSH_INTERVAL = float(os.environ.get("CACHE_FLUSH_INTERVAL_SECONDS", "30"))
@@ -48,16 +48,15 @@ class Gateway:
         self.stop_event = threading.Event()
         # Any thread may declare the gateway unrecoverable; run() reads this to
         # pick the exit code. A worker cannot just re-raise: an exception on a
-        # non-main thread leaves the process status at 0, and killing the
-        # uploader strands upload_queue.join() on task_done calls that will
-        # never come. See _fail_fatally.
+        # non-main thread leaves the process status at 0. The reader re-raises
+        # instead, which is fail-fast on the main thread. See _fail_fatally.
         self.fatal_reason: str | None = None
         self._fatal_lock = threading.Lock()
-        self.upload_queue: queue.Queue[tuple[str, dict[str, Any], float]] = queue.Queue(
-            maxsize=QUEUE_SIZE
-        )
-        # Acknowledgements take the same decoupled route as telemetry: the
-        # reader thread must never wait on the network. See _queue_ack.
+        # Raised whenever the reader adds to the outbox, so the uploader starts
+        # draining immediately instead of waiting out its idle interval.
+        self.outbox_pending = threading.Event()
+        # Acknowledgements are the one thing still buffered in memory: they are
+        # small, and losing one costs a status, not a measurement. See _queue_ack.
         self.ack_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=ACK_QUEUE_SIZE)
         self.tracker = MCountTracker()
         self.serial_port: serial.Serial | None = None
@@ -68,15 +67,20 @@ class Gateway:
         self._last_drop_report = 0.0
 
     def enqueue(self, node: str, payload: dict[str, Any], recorded_at: float) -> None:
-        try:
-            self.upload_queue.put_nowait((node, payload, recorded_at))
-        except queue.Full:
-            if not gateway_cache.save_to_local_cache(
-                node, payload, recorded_at=recorded_at, last_error="upload queue full"
-            ):
-                raise gateway_cache.TelemetryDeliveryError(
-                    "upload queue full and SQLite fallback failed"
-                )
+        """Write the packet to the durable outbox before anything else sees it.
+
+        Telemetry used to sit in an in-memory queue until an upload attempt
+        failed, so a power cut took everything not yet tried — hundreds of
+        packets, with no record that they had ever existed. SQLite is now the
+        first stop, not the fallback, and delivery is a separate concern.
+        """
+        if not gateway_cache.save_to_local_cache(
+            node, payload, recorded_at=recorded_at
+        ):
+            raise gateway_cache.TelemetryDeliveryError(
+                "telemetry could not be written to the outbox"
+            )
+        self.outbox_pending.set()
 
     def _fail_fatally(self, reason: str) -> None:
         """Declare an unrecoverable condition and begin an orderly shutdown.
@@ -93,28 +97,31 @@ class Gateway:
         self.stop_event.set()
 
     def _uploader(self) -> None:
-        while not self.stop_event.is_set() or not self.upload_queue.empty():
+        """Drain the outbox, woken by new packets and by an idle timer.
+
+        This is the only delivery path. It replaces the upload queue and the
+        separate idle flusher, which existed because the queue could not drain a
+        backlog nobody was pushing into. Nothing here can lose a packet: a row
+        stays in SQLite until the backend has taken it or permanently refused it.
+        """
+        failures = 0
+        while not self.stop_event.is_set():
+            self.outbox_pending.clear()
             try:
-                node, payload, recorded_at = self.upload_queue.get(timeout=0.25)
-            except queue.Empty:
-                continue
-            try:
-                uploaded = gateway_cache.upload_telemetry(
-                    node, payload, recorded_at=recorded_at
-                )
-                mcount = payload.get("meta", {}).get("mcount", "?")
-                if uploaded:
-                    print(f"UPLOADED: node={node} mcount={mcount}")
-                else:
-                    print(f"CACHED: node={node} mcount={mcount} waiting for retry")
-            except gateway_cache.TelemetryDeliveryError as exc:
-                # Neither the backend nor SQLite will take it. Carrying on would
-                # drop every packet from here to the end of the run, silently.
-                self._fail_fatally(str(exc))
+                while gateway_cache.flush_local_cache() and not self.stop_event.is_set():
+                    pass
+                failures = 0
             except Exception as exc:
-                print(f"CRITICAL: telemetry delivery failed: {exc}")
-            finally:
-                self.upload_queue.task_done()
+                # Network faults never reach here — flush_local_cache keeps the
+                # row and retries. Escaping means the outbox itself is unusable,
+                # and the reader will not notice until its next write, which at
+                # a packet every few tens of minutes is far too long to sit here
+                # accepting data we have no way to ship.
+                failures += 1
+                print(f"WARNING: outbox flush failed ({failures}): {exc}")
+                if failures >= OUTBOX_FAILURE_LIMIT:
+                    self._fail_fatally(f"outbox unusable after {failures} attempts: {exc}")
+            self.outbox_pending.wait(CACHE_FLUSH_INTERVAL)
 
     def _handle_line(self, line: str) -> None:
         if "【ACK】" in line:
@@ -162,27 +169,6 @@ class Gateway:
                 rssi=ack.get("rssi"),
                 snr=ack.get("snr"),
             )
-
-    def _drain_upload_queue_to_cache(self) -> int:
-        """Persist queued events the uploader did not get to before shutdown."""
-        stranded = 0
-        while True:
-            try:
-                node, payload, recorded_at = self.upload_queue.get_nowait()
-            except queue.Empty:
-                return stranded
-            try:
-                if gateway_cache.save_to_local_cache(
-                    node,
-                    payload,
-                    recorded_at=recorded_at,
-                    last_error="gateway shut down before upload",
-                ):
-                    stranded += 1
-                else:
-                    print(f"CRITICAL: lost queued event from {node} on shutdown")
-            finally:
-                self.upload_queue.task_done()
 
     def _drain_ack_queue(self, *, deliver: bool) -> None:
         """Report queued ACKs, or persist them when shutting down."""
@@ -250,25 +236,6 @@ class Gateway:
         summary = ", ".join(f"{k}={v}" for k, v in sorted(self.dropped.items()))
         print(f"WARNING: dropped packets so far: {summary}")
 
-    def _cache_flusher(self) -> None:
-        """Drain the SQLite backlog even while no packets are arriving.
-
-        ``upload_telemetry`` only flushes as a side effect of a new uplink, so a
-        backlog built up while the backend was down would otherwise sit there
-        until the next packet — which may never come if the nodes went quiet too.
-        """
-        while not self.stop_event.is_set():
-            self.stop_event.wait(CACHE_FLUSH_INTERVAL)
-            if self.stop_event.is_set():
-                return
-            try:
-                sent = gateway_cache.flush_local_cache()
-            except Exception as exc:
-                print(f"WARNING: idle cache flush failed: {exc}")
-                continue
-            if sent:
-                print(f"Flushed {sent} cached events from the backlog")
-
     def _command_poller(self) -> None:
         while not self.stop_event.is_set():
             self._drain_ack_queue(deliver=True)
@@ -326,12 +293,13 @@ class Gateway:
         )
         if not API_KEY:
             print("WARNING: LORA_API_KEY is empty; protected backend uploads will fail")
-        uploader = threading.Thread(target=self._uploader, name="uploader", daemon=False)
+        # Daemon is safe now that the outbox is durable: killing the uploader
+        # mid-flight loses an HTTP attempt, not a packet — the row stays pending
+        # and goes out on the next run. A non-daemon thread would let a socket
+        # with no deadline hold the process open past any join() we do here.
+        uploader = threading.Thread(target=self._uploader, name="uploader", daemon=True)
         uploader.start()
-        flusher = threading.Thread(
-            target=self._cache_flusher, name="cache-flusher", daemon=True
-        )
-        flusher.start()
+        poller: threading.Thread | None = None
         try:
             self.serial_port = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.25)
             self.serial_writer = SerialWriter(self.serial_port)
@@ -359,23 +327,23 @@ class Gateway:
             print("Gateway shutdown requested")
         finally:
             self.stop_event.set()
-            # Bounded: upload_queue.join() waits on task_done forever, so a dead
-            # uploader used to hang shutdown outright. Give it a window, then
-            # put whatever is left somewhere durable instead of losing it.
+            self.outbox_pending.set()  # wake the uploader out of its idle wait
             uploader.join(timeout=SHUTDOWN_DRAIN_SECONDS)
             if uploader.is_alive():
-                print(
-                    f"WARNING: uploader still working after {SHUTDOWN_DRAIN_SECONDS}s"
-                )
+                print(f"WARNING: uploader still working after {SHUTDOWN_DRAIN_SECONDS}s")
             # Cleanup runs on the way out of a failure, so it must not be able
             # to replace the exception that caused it — losing the real cause,
             # and skipping the steps after whichever one raised.
             try:
-                stranded = self._drain_upload_queue_to_cache()
-                if stranded:
-                    print(f"Persisted {stranded} events that had not been uploaded yet")
+                # The poller persists its own queued ACKs on the way out, but it
+                # is a daemon: it can be killed before it gets there. Join it,
+                # then do the same thing from here so the outcome does not
+                # depend on a daemon winning a race with interpreter shutdown.
+                if poller is not None:
+                    poller.join(timeout=SHUTDOWN_DRAIN_SECONDS)
+                self._drain_ack_queue(deliver=False)
             except Exception as exc:
-                print(f"CRITICAL: could not persist queued events on shutdown: {exc}")
+                print(f"CRITICAL: could not persist queued ACKs on shutdown: {exc}")
             try:
                 if self.serial_port and self.serial_port.is_open:
                     self.serial_port.close()

@@ -76,7 +76,10 @@ GET /healthz
 
 成功回應為 HTTP 200；資料庫無法連線時為 HTTP 503。
 
-## SQLite 快取
+## SQLite outbox
+
+每個封包一解析完就先寫進 SQLite，之後才由上傳執行緒送出。SQLite 是**第一站**
+而不是失敗後的退路，所以停電或當掉時不會有「還沒送出、也沒有任何紀錄」的資料。
 
 Gateway 啟動時會顯示：
 
@@ -84,10 +87,14 @@ Gateway 啟動時會顯示：
 Gateway cache ready: 3 pending, 1 quarantined
 ```
 
-- `pending`：等待補傳。
+- `pending`：已落盤、等待送出。
 - `quarantined`：壞 JSON 或被後端永久拒絕的資料，保留供診斷但不阻塞補傳。
 
-暫時性網路問題、HTTP 408、425、429 與 5xx 都不會刪除快取。
+暫時性網路問題、HTTP 408、425、429 與 5xx 都不會刪除資料。送出成功才刪除，
+所以每筆最少送達一次；後端以 `event_id` 去重。
+
+寫不進 outbox 時 gateway 會以非零狀態結束，交給服務管理器重啟 —— 繼續收封包
+卻無處可放，只會安靜地掉資料。
 
 ## 測試
 

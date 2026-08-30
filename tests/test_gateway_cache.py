@@ -46,28 +46,6 @@ def test_dead_letter_rows_do_not_evict_live_pending(tmp_path, monkeypatch):
     assert live_ids == {"live-0", "live-1", "live-2"}
 
 
-def test_network_failure_is_cached_with_stable_identity(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-
-    def fail(*args, **kwargs):
-        raise gateway_cache.requests.Timeout("offline")
-
-    monkeypatch.setattr(gateway_cache.requests, "post", fail)
-    assert not gateway_cache.upload_telemetry(
-        "s05",
-        {"data": {"t": 25.0}, "meta": {"via": ["s02"]}},
-        event_id="event-fixed-0001",
-        recorded_at=1000.0,
-    )
-    assert gateway_cache.cache_count() == 1
-    with sqlite3.connect(database) as conn:
-        envelope = json.loads(conn.execute("SELECT payload FROM cache").fetchone()[0])
-    assert envelope["event_id"] == "event-fixed-0001"
-    assert envelope["recorded_at"] == 1000.0
-    assert envelope["meta"]["via"] == ["s02"]
-
-
 def test_500_remains_cached_and_429_then_recovery(tmp_path, monkeypatch):
     database = tmp_path / "cache.db"
     gateway_cache.configure("https://backend.invalid/update", str(database))
@@ -256,50 +234,6 @@ def test_legacy_database_is_migrated_and_the_backfill_is_idempotent(tmp_path):
         ).fetchall() == migrated
 
 
-def test_backlog_flush_failure_does_not_cost_the_current_event(tmp_path, monkeypatch):
-    """A SQLite fault in the backlog says nothing about the event being sent."""
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-
-    def broken_flush():
-        raise sqlite3.OperationalError("database is locked")
-
-    monkeypatch.setattr(gateway_cache, "flush_local_cache", broken_flush)
-    posted = []
-    monkeypatch.setattr(
-        gateway_cache.requests,
-        "post",
-        lambda *args, **kwargs: posted.append(kwargs.get("json")) or Response(204),
-    )
-
-    # The backend is healthy, so the event must still be delivered.
-    assert gateway_cache.upload_telemetry(
-        "s05", {"data": {"t": 25.0}, "meta": {}}, event_id="survives-0001"
-    )
-    assert len(posted) == 1
-    assert posted[0]["event_id"] == "survives-0001"
-
-
-def test_backlog_flush_failure_still_falls_back_to_the_cache(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-    monkeypatch.setattr(
-        gateway_cache,
-        "flush_local_cache",
-        lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
-    )
-    def fail(*args, **kwargs):
-        raise gateway_cache.requests.Timeout("offline")
-
-    monkeypatch.setattr(gateway_cache.requests, "post", fail)
-
-    # Backend down as well: the event belongs in the cache, not in a traceback.
-    assert not gateway_cache.upload_telemetry(
-        "s05", {"data": {"t": 25.0}, "meta": {}}, event_id="cached-0001"
-    )
-    assert gateway_cache.cache_count() == 1
-
-
 def test_queued_ack_is_due_immediately_and_spends_no_retry(tmp_path):
     database = tmp_path / "cache.db"
     gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
@@ -313,3 +247,60 @@ def test_queued_ack_is_due_immediately_and_spends_no_retry(tmp_path):
     # It has not failed at anything yet, so no backoff and no attempt spent.
     assert retries == 0
     assert next_attempt == 0.0
+
+
+# --- the outbox: durable before delivery, not after a failed delivery --------
+
+def test_outbox_write_preserves_identity_and_meta(tmp_path):
+    """What the reader persists is exactly what the backend will later receive."""
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+
+    assert gateway_cache.save_to_local_cache(
+        "s05",
+        {"data": {"t": 25.0}, "meta": {"via": ["s02"], "mcount": 7}},
+        recorded_at=1000.0,
+        event_id="event-fixed-0001",
+    )
+
+    with sqlite3.connect(database) as conn:
+        envelope = json.loads(conn.execute("SELECT payload FROM cache").fetchone()[0])
+    assert envelope["event_id"] == "event-fixed-0001"
+    assert envelope["recorded_at"] == 1000.0
+    assert envelope["meta"]["via"] == ["s02"]
+    assert envelope["data"] == {"t": 25.0}
+
+
+def test_a_failed_flush_leaves_the_packet_in_the_outbox(tmp_path, monkeypatch):
+    """A delivery fault costs an attempt, never the measurement."""
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+    gateway_cache.save_to_local_cache(
+        "s05", {"data": {"t": 25.0}, "meta": {}}, event_id="survives-0001"
+    )
+
+    def offline(*args, **kwargs):
+        raise gateway_cache.requests.Timeout("offline")
+
+    monkeypatch.setattr(gateway_cache.requests, "post", offline)
+    assert gateway_cache.flush_local_cache() == 0
+    assert gateway_cache.cache_count() == 1
+
+    # Backend returns: the same row goes out, unchanged.
+    monkeypatch.setattr(
+        gateway_cache.requests, "post", lambda *a, **k: Response(204)
+    )
+    assert gateway_cache.flush_local_cache() == 1
+    assert gateway_cache.cache_count() == 0
+
+
+def test_flush_logs_each_packet_it_delivers(tmp_path, monkeypatch, capsys):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
+    gateway_cache.save_to_local_cache(
+        "s03", {"data": {"t": 1.0}, "meta": {"mcount": 7}}, event_id="logged-0001"
+    )
+    monkeypatch.setattr(gateway_cache.requests, "post", lambda *a, **k: Response(204))
+
+    assert gateway_cache.flush_local_cache() == 1
+    assert "UPLOADED: node=s03 mcount=7" in capsys.readouterr().out
