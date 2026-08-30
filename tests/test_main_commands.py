@@ -525,3 +525,45 @@ class _InlineThread:
     def start(self):
         self._started.append(self)
         self._target()
+
+
+# --- a silenced alert path must be visible from outside ----------------------
+
+def test_healthz_reports_an_unset_webhook(monkeypatch):
+    """The failure this exists to catch: alerts firing into the log forever
+    while every external signal says the deployment is healthy."""
+    monkeypatch.setattr(main, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(main, "db_fetch", lambda *a, **k: [(1,)])
+    with main.app.test_client() as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "database": "ok",
+        "discord": "unset",
+    }
+
+
+def test_healthz_reports_a_configured_webhook_without_leaking_it(monkeypatch):
+    secret = "https://discord.com/api/webhooks/1/super-secret-token"
+    monkeypatch.setattr(main, "DISCORD_WEBHOOK_URL", secret)
+    monkeypatch.setattr(main, "db_fetch", lambda *a, **k: [(1,)])
+    with main.app.test_client() as client:
+        response = client.get("/healthz")
+
+    assert response.get_json()["discord"] == "configured"
+    assert "super-secret-token" not in response.get_data(as_text=True)
+
+
+def test_healthz_still_reports_discord_when_the_database_is_down(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(main, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(main, "db_fetch", boom)
+    with main.app.test_client() as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 503
+    assert response.get_json()["discord"] == "unset"

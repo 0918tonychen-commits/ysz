@@ -71,6 +71,8 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required")
 if not API_KEY:
     print("WARNING: LORA_API_KEY is unset; protected endpoints reject all requests")
+if not DISCORD_WEBHOOK_URL:
+    print("WARNING: DISCORD_WEBHOOK_URL is unset; alerts are logged, never delivered")
 
 T = TypeVar("T")
 
@@ -651,12 +653,27 @@ def all_data():
 
 @app.get("/healthz")
 def healthz():
-    """Deployment health probe: verifies the process and PostgreSQL connection."""
+    """Deployment health probe: process, PostgreSQL, and alert delivery.
+
+    ``discord`` reports whether a webhook is configured at all. An unset one is
+    not an error — alerts fall back to the log — but it silences every alert
+    the service raises, and nothing else about a healthy deployment gives that
+    away. It reports configuration, not reachability: the URL is never called
+    here, so a webhook that has since been revoked still reads "configured".
+    """
+    discord = "configured" if DISCORD_WEBHOOK_URL else "unset"
     try:
         row = db_fetch("SELECT 1")
     except psycopg.Error:
-        return jsonify(status="error", database="unavailable"), 503
-    return jsonify(status="ok", database="ok" if row == [(1,)] else "unexpected"), 200
+        return jsonify(status="error", database="unavailable", discord=discord), 503
+    return (
+        jsonify(
+            status="ok",
+            database="ok" if row == [(1,)] else "unexpected",
+            discord=discord,
+        ),
+        200,
+    )
 
 
 def _history(node: str, cutoff: float) -> dict[str, Any]:
