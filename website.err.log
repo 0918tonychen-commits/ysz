@@ -1,0 +1,45 @@
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:10000
+ * Running on http://192.168.50.71:10000
+Press CTRL+C to quit
+127.0.0.1 - - [06/Sep/2026 16:27:28] "GET /healthz HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:06] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:08] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [06/Sep/2026 16:28:08] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:12] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:14] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:16] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:16] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:17] "GET /healthz HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:20] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:24] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:28] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:32] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:36] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:40] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:44] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:48] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:52] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:28:56] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:00] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:04] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:08] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:12] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:16] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:20] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:24] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:28] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:32] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:36] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:40] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:44] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:48] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:52] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:29:56] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:30:00] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:30:04] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:30:08] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:30:12] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:30:16] "GET /api/all_data HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 16:30:20] "GET /api/all_data HTTP/1.1" 200 -

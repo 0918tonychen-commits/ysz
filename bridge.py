@@ -16,7 +16,7 @@ from lora_payload import MCountTracker, parse_ack_line, parse_payload
 
 load_dotenv()
 
-COM_PORT = os.environ.get("LORA_COM_PORT", "COM3")
+COM_PORT = os.environ.get("LORA_COM_PORT", "COM5")
 BAUD_RATE = int(os.environ.get("LORA_BAUD_RATE", "115200"))
 BACKEND_URL = os.environ.get("BACKEND_URL", "https://ysz.onrender.com/update")
 LOCAL_DB = os.environ.get("GATEWAY_CACHE_DB", "gateway_cache.db")
@@ -30,6 +30,8 @@ MAX_SERIAL_LINE = 8192
 COMMAND_POLL_INTERVAL = float(os.environ.get("COMMAND_POLL_INTERVAL_SECONDS", "5"))
 CACHE_FLUSH_INTERVAL = float(os.environ.get("CACHE_FLUSH_INTERVAL_SECONDS", "30"))
 DROP_REPORT_INTERVAL = float(os.environ.get("DROP_REPORT_INTERVAL_SECONDS", "300"))
+SERIAL_RECONNECT_SECONDS = 3.0
+SERIAL_RECONNECT_MAX_SECONDS = 30.0
 
 
 class SerialWriter:
@@ -41,8 +43,11 @@ class SerialWriter:
         if not command or not command.strip():
             raise ValueError("empty serial command is not allowed")
         with self._lock:
-            self._serial.write((command.rstrip("\r\n") + "\n").encode("utf-8"))
-            self._serial.flush()
+            data = (command.rstrip("\r\n") + "\n").encode("utf-8")
+            if self._serial.write(data) != len(data):
+                raise serial.SerialException("incomplete serial command write")
+            # write() has a finite timeout. Windows flush() can wait forever
+            # for out_waiting, blocking both the reader and reconnect cleanup.
 
 
 class Gateway:
@@ -63,6 +68,8 @@ class Gateway:
         self.tracker = MCountTracker()
         self.serial_port: serial.Serial | None = None
         self.serial_writer: SerialWriter | None = None
+        self._serial_lock = threading.Lock()
+        self._serial_failed = threading.Event()
         # Dropped packets used to vanish without a trace, which hid exactly the
         # restart behaviour we need to see. Count them and report periodically.
         self.dropped: dict[str, int] = {}
@@ -265,7 +272,15 @@ class Gateway:
             try:
                 self._drain_ack_queue(deliver=True)
                 gateway_cache.flush_command_acks()
-                for command in gateway_cache.fetch_pending_commands():
+                # Fetching claims commands as 'sent' on the backend. Leave
+                # them queued there while the receiver is disconnected.
+                with self._serial_lock:
+                    connected = (
+                        self.serial_writer is not None
+                        and not self._serial_failed.is_set()
+                    )
+                commands = gateway_cache.fetch_pending_commands() if connected else []
+                for command in commands:
                     self._dispatch_command(command)
                 failures = 0
             except Exception as exc:
@@ -303,22 +318,88 @@ class Gateway:
             # Nothing to report against: without a cmd_id there is no row to fix.
             print(f"WARNING: skipping malformed pending command: {command}")
             return
-        if self.serial_writer is None:
-            self._report_dispatch_failure(node, cmd_id, "serial port not open")
-            return
         line = f"CMD {cmd_id} {node} {cmd}"
         if arg:
             line += f" {arg}"
-        try:
-            self.serial_writer.write_line(line)
-        except (ValueError, serial.SerialException) as exc:
-            self._report_dispatch_failure(node, cmd_id, str(exc))
+        failure = None
+        # Serialize writes with port replacement. A command already
+        # claimed when the port fails is reported, never automatically replayed.
+        with self._serial_lock:
+            writer = self.serial_writer
+            if writer is None or self._serial_failed.is_set():
+                failure = "serial port not open"
+            else:
+                try:
+                    writer.write_line(line)
+                except (serial.SerialException, OSError) as exc:
+                    self._serial_failed.set()
+                    failure = str(exc)
+                except ValueError as exc:
+                    failure = str(exc)
+        if failure is not None:
+            self._report_dispatch_failure(node, cmd_id, failure)
             return
         print(f"Dispatched command to serial: {line}")
 
     def _report_dispatch_failure(self, node: str, cmd_id: str, reason: str) -> None:
         print(f"WARNING: failed to dispatch command {cmd_id}: {reason}")
         gateway_cache.report_dispatch_failure(node, cmd_id, reason)
+
+    def _close_serial(self) -> None:
+        with self._serial_lock:
+            port = self.serial_port
+            self.serial_writer = None
+            self.serial_port = None
+            try:
+                if port is not None and port.is_open:
+                    port.close()
+            except Exception as exc:
+                print(f"WARNING: closing the serial port failed: {exc}")
+
+    def _read_serial(self) -> None:
+        """Reconnect the receiver without restarting delivery or node tracking."""
+        buffer = bytearray()
+        retry_delay = SERIAL_RECONNECT_SECONDS
+        failures = 0
+        while not self.stop_event.is_set():
+            try:
+                with self._serial_lock:
+                    if self.serial_port is None:
+                        self.serial_port = serial.Serial(
+                            COM_PORT, BAUD_RATE, timeout=0.25, write_timeout=1.0
+                        )
+                        self.serial_writer = SerialWriter(self.serial_port)
+                        self._serial_failed.clear()
+                        print(f"LoRa gateway listening on {COM_PORT} at {BAUD_RATE} baud")
+                    if self._serial_failed.is_set():
+                        raise serial.SerialException("serial command write failed")
+                    port = self.serial_port
+                # Only this reader closes/replaces ports. Do not hold the
+                # writer lock across a blocking read: quiet ports must still
+                # allow the command poller to acquire it and send downlinks.
+                chunk = port.read(port.in_waiting or 1)
+            except (serial.SerialException, OSError) as exc:
+                self._close_serial()
+                if buffer:
+                    print("WARNING: discarded incomplete serial line after disconnect")
+                    buffer.clear()
+                failures += 1
+                print(
+                    f"WARNING: serial connection failed on {COM_PORT} ({failures}x): "
+                    f"{exc}; retrying in {retry_delay:g}s"
+                )
+                if self.stop_event.wait(retry_delay):
+                    break
+                retry_delay = min(retry_delay * 2, SERIAL_RECONNECT_MAX_SECONDS)
+                continue
+            if chunk:
+                if failures:
+                    print(f"Serial connection recovered on {COM_PORT}; receiving data")
+                failures = 0
+                retry_delay = SERIAL_RECONNECT_SECONDS
+                # Keep durable-cache/parse errors outside the serial retry
+                # handler: failure to preserve telemetry is still fatal.
+                buffer = self._consume(buffer, chunk)
 
     def run(self) -> None:
         gateway_cache.configure(BACKEND_URL, LOCAL_DB, API_KEY)
@@ -338,28 +419,11 @@ class Gateway:
         uploader.start()
         poller: threading.Thread | None = None
         try:
-            self.serial_port = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.25)
-            self.serial_writer = SerialWriter(self.serial_port)
-            print(f"LoRa gateway listening on {COM_PORT} at {BAUD_RATE} baud")
             poller = threading.Thread(
                 target=self._command_poller, name="command-poller", daemon=True
             )
             poller.start()
-            buffer = bytearray()
-            while not self.stop_event.is_set():
-                chunk = self.serial_port.read(self.serial_port.in_waiting or 1)
-                if not chunk:
-                    continue
-                buffer = self._consume(buffer, chunk)
-            if buffer:
-                self._handle_line(buffer.decode("utf-8", errors="ignore").strip())
-        except serial.SerialException as exc:
-            # On this thread re-raising is the fail-fast: the traceback exits
-            # non-zero by itself. _fail_fatally exists for the threads where it
-            # cannot — see _uploader. TelemetryDeliveryError from enqueue is
-            # deliberately left to propagate the same way.
-            print(f"CRITICAL: serial connection failed: {exc}")
-            raise
+            self._read_serial()
         except KeyboardInterrupt:
             print("Gateway shutdown requested")
         finally:
@@ -381,19 +445,14 @@ class Gateway:
                 self._drain_ack_queue(deliver=False)
             except Exception as exc:
                 print(f"CRITICAL: could not persist queued ACKs on shutdown: {exc}")
-            try:
-                if self.serial_port and self.serial_port.is_open:
-                    self.serial_port.close()
-            except Exception as exc:
-                print(f"WARNING: closing the serial port failed: {exc}")
+            self._close_serial()
 
 
 def main() -> None:
     gateway = Gateway()
     gateway.run()
     if gateway.fatal_reason:
-        # Non-zero so a service manager restarts us. A clean Ctrl-C, and a
-        # serial port that simply went away, are now told apart by this alone.
+        # Durable-outbox failures remain fatal; transient serial faults retry.
         raise SystemExit(1)
 
 

@@ -57,18 +57,31 @@ def _prepare_run(monkeypatch):
     monkeypatch.setattr(bridge.threading, "Thread", _NoopThread)
 
 
-def test_serial_failure_propagates_for_service_restart(monkeypatch, capsys):
+def test_serial_open_failure_retries_until_stopped(monkeypatch, capsys):
     _prepare_run(monkeypatch)
+    gateway = bridge.Gateway()
+    attempts = []
+    waits = []
 
     def fail_to_open(*args, **kwargs):
+        attempts.append(True)
         raise bridge.serial.SerialException("port unavailable")
 
+    def wait(delay):
+        waits.append(delay)
+        if len(waits) == 6:
+            gateway.stop_event.set()
+            return True
+        return False
+
     monkeypatch.setattr(bridge.serial, "Serial", fail_to_open)
+    monkeypatch.setattr(gateway.stop_event, "wait", wait)
+    gateway.run()
 
-    with pytest.raises(bridge.serial.SerialException, match="port unavailable"):
-        bridge.Gateway().run()
-
-    assert "CRITICAL: serial connection failed" in capsys.readouterr().out
+    assert len(attempts) == 6
+    assert waits == [3, 6, 12, 24, 30, 30]
+    assert gateway.fatal_reason is None
+    assert "retrying in 3s" in capsys.readouterr().out
 
 
 def test_delivery_failure_propagates_for_service_restart(monkeypatch):
@@ -328,18 +341,18 @@ def test_shutdown_cleanup_cannot_mask_the_real_cause(monkeypatch, capsys):
     """A failing drain must not replace the exception that ended the run."""
     _prepare_run(monkeypatch)
 
-    def fail_to_open(*args, **kwargs):
-        raise bridge.serial.SerialException("port unavailable")
-
-    monkeypatch.setattr(bridge.serial, "Serial", fail_to_open)
     gateway = bridge.Gateway()
+    def fail_delivery():
+        raise bridge.gateway_cache.TelemetryDeliveryError("outbox failed")
+
+    monkeypatch.setattr(gateway, "_read_serial", fail_delivery)
     monkeypatch.setattr(
         gateway,
         "_drain_ack_queue",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("drain blew up")),
     )
 
-    with pytest.raises(bridge.serial.SerialException, match="port unavailable"):
+    with pytest.raises(bridge.gateway_cache.TelemetryDeliveryError, match="outbox failed"):
         gateway.run()
 
     out = capsys.readouterr().out
@@ -498,3 +511,215 @@ def test_a_failed_ack_delivery_is_persisted_not_dropped(monkeypatch, capsys):
     assert saved == [("s03", "C7", "OK")]
     assert "ACK C7 not delivered" in capsys.readouterr().out
     assert gateway.ack_queue.empty()
+
+
+@pytest.mark.parametrize("failure_stage", ["open", "in_waiting", "read"])
+def test_serial_reconnect_receives_and_persists_next_packet(monkeypatch, capsys, failure_stage):
+    _prepare_run(monkeypatch)
+    gateway = bridge.Gateway()
+    waits = []
+    opened = []
+    saved = []
+
+    class Port:
+        is_open = True
+
+        def __init__(self, broken=False):
+            self.broken = broken
+
+        @property
+        def in_waiting(self):
+            if self.broken and failure_stage == "in_waiting":
+                raise bridge.serial.SerialException("ClearCommError failed")
+            return 1
+
+        def read(self, size):
+            if self.broken:
+                raise bridge.serial.SerialException("read failed")
+            gateway.stop_event.set()
+            return "數據: s03_m1,t,25,boot,ABCD1234\n".encode()
+
+        def close(self):
+            self.is_open = False
+
+    def connect(*args, **kwargs):
+        assert kwargs["write_timeout"] == 1.0
+        first = not opened
+        if first and failure_stage == "open":
+            opened.append(None)
+            raise bridge.serial.SerialException("port absent")
+        port = Port(broken=first)
+        opened.append(port)
+        return port
+
+    monkeypatch.setattr(bridge.serial, "Serial", connect)
+    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: waits.append(delay) or False)
+    monkeypatch.setattr(
+        bridge.gateway_cache, "save_to_local_cache",
+        lambda node, payload, **kwargs: saved.append((node, payload)) or True,
+    )
+    gateway.run()
+
+    assert len(opened) == 2
+    assert waits == [3]
+    assert all(port is None or not port.is_open for port in opened)
+    assert len(saved) == 1 and saved[0][0] == "s03"
+    assert "Serial connection recovered on COM5" in capsys.readouterr().out
+    assert gateway.fatal_reason is None
+
+
+def test_reconnect_discards_fragment_and_preserves_boot_tracker(monkeypatch):
+    _prepare_run(monkeypatch)
+    gateway = bridge.Gateway()
+    first_line = "數據: s03_m1,t,25,boot,AAAA1111\n".encode()
+    new_boot = "數據: s03_m1,t,26,boot,BBBB2222\n".encode()
+    saved = []
+    errors = bridge.serial.SerialException
+
+    class Port:
+        is_open = True
+        in_waiting = 1
+
+        def __init__(self, items):
+            self.items = iter(items)
+
+        def read(self, size):
+            item = next(self.items)
+            if isinstance(item, Exception):
+                raise item
+            if item is None:
+                gateway.stop_event.set()
+                return b""
+            return item
+
+        def close(self):
+            self.is_open = False
+
+    ports = iter([
+        Port([first_line + b"broken-fragment", errors("unplugged")]),
+        Port([first_line + new_boot, None]),
+    ])
+    monkeypatch.setattr(bridge.serial, "Serial", lambda *a, **k: next(ports))
+    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: False)
+    monkeypatch.setattr(
+        bridge.gateway_cache, "save_to_local_cache",
+        lambda node, payload, **kwargs: saved.append(payload) or True,
+    )
+    gateway.run()
+
+    assert [p["meta"]["boot_id"] for p in saved] == ["AAAA1111", "BBBB2222"]
+    assert saved[1]["meta"]["rebooted"] == 1.0
+    assert gateway.dropped == {"s03/duplicate": 1}
+
+
+def test_disconnected_poller_delivers_acks_without_claiming_commands(monkeypatch):
+    gateway = bridge.Gateway()
+    reports = []
+    gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C8", "result": "OK"})
+    monkeypatch.setattr(
+        bridge.gateway_cache, "report_command_ack",
+        lambda *a, **k: reports.append(a),
+    )
+    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", lambda: 0)
+    monkeypatch.setattr(
+        bridge.gateway_cache, "fetch_pending_commands",
+        lambda: pytest.fail("must not claim commands while offline"),
+    )
+    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: gateway.stop_event.set())
+    gateway._command_poller()
+    assert reports == [("s03", "C8", "OK")]
+
+
+def test_write_failure_triggers_reconnect_without_replaying_command(monkeypatch):
+    _prepare_run(monkeypatch)
+    gateway = bridge.Gateway()
+    writes = []
+    reports = []
+    opened = []
+
+    class Port:
+        is_open = True
+        in_waiting = 1
+
+        def write(self, data):
+            writes.append(data)
+            raise bridge.serial.SerialException("USB write failed")
+
+        def read(self, size):
+            # A downlink can run while a read is active (no lock starvation).
+            if len(opened) == 1:
+                gateway._dispatch_command({"cmd_id": "C9", "node": "s03", "cmd": "REBOOT"})
+            else:
+                gateway.stop_event.set()
+            return b""
+
+        def close(self):
+            self.is_open = False
+
+    def connect(*args, **kwargs):
+        port = Port()
+        opened.append(port)
+        return port
+
+    monkeypatch.setattr(bridge.serial, "Serial", connect)
+    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: False)
+    monkeypatch.setattr(
+        bridge.gateway_cache, "report_dispatch_failure",
+        lambda *args: reports.append(args),
+    )
+    gateway.run()
+    assert len(opened) == 2
+    assert writes == [b"CMD C9 s03 REBOOT\n"]
+    assert reports == [("s03", "C9", "USB write failed")]
+
+
+def test_serial_writer_rejects_partial_write_without_unbounded_flush():
+    class PartialPort:
+        def write(self, data):
+            return len(data) - 1
+
+        def flush(self):
+            pytest.fail("unbounded flush must not be used")
+
+    with pytest.raises(bridge.serial.SerialException, match="incomplete"):
+        bridge.SerialWriter(PartialPort()).write_line("CMD C1 s03 PING")
+
+
+def test_disconnect_while_fetching_reports_claimed_command_once(monkeypatch):
+    gateway = bridge.Gateway()
+    reports = []
+    gateway.serial_writer = object()  # only used to observe connected state
+
+    def fetch():
+        gateway._close_serial()
+        return [{"cmd_id": "C10", "node": "s03", "cmd": "REBOOT"}]
+
+    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", lambda: 0)
+    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", fetch)
+    monkeypatch.setattr(
+        bridge.gateway_cache, "report_dispatch_failure",
+        lambda *args: reports.append(args),
+    )
+    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: gateway.stop_event.set())
+    gateway._command_poller()
+    assert reports == [("s03", "C10", "serial port not open")]
+
+
+def test_ctrl_c_during_serial_retry_exits_cleanly(monkeypatch, capsys):
+    _prepare_run(monkeypatch)
+    gateway = bridge.Gateway()
+    attempts = []
+
+    def connect(*args, **kwargs):
+        attempts.append(True)
+        raise bridge.serial.SerialException("port absent")
+
+    def interrupt(delay):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(bridge.serial, "Serial", connect)
+    monkeypatch.setattr(gateway.stop_event, "wait", interrupt)
+    gateway.run()
+    assert len(attempts) == 1
+    assert gateway.fatal_reason is None
+    assert "Gateway shutdown requested" in capsys.readouterr().out
