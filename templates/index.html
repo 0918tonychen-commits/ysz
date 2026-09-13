@@ -90,13 +90,26 @@ const chart=chartReady?new Chart(document.getElementById("chart"),{type:"line",d
 function element(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=String(text);return node;}
 function valueCell(parent,label,value){const box=element("div");box.append(element("div","label",label),element("div","value",value??"--"));parent.append(box);}
 function formatTime(epoch){return Number.isFinite(epoch)?new Date(epoch*1000).toLocaleString("zh-TW",{hour12:false}):"--";}
+function radioMetaForDisplay(meta){
+  const values={...(meta||{})},via=Array.isArray(values.via)?values.via:[];
+  // A direct node has no relay hop, so a missing hop metric is not an error.
+  if(!via.length){
+    if(values.hop_rssi===undefined||values.hop_rssi===null)values.hop_rssi="N/A";
+    if(values.hop_snr===undefined||values.hop_snr===null)values.hop_snr="N/A";
+  // Relayed packets arrive with hop SNR(s) first and gateway SNR last.
+  }else if((values.hop_snr===undefined||values.hop_snr===null)&&Array.isArray(values.snr)&&values.snr.length===via.length+1){
+    values.hop_snr=values.snr.slice(0,-1);
+    values.snr=values.snr.at(-1);
+  }
+  return values;
+}
 function renderCards(response){
   grid.replaceChildren();const nodes=response.nodes||{};
   for(const id of Object.keys(nodes).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}))){
     const node=nodes[id]||{},card=element("article",`card${node.online?"":" offline"}`),title=element("div","title");
     title.append(element("span","",id.toUpperCase()),element("span","",node.online?"ONLINE":"OFFLINE"));card.append(title);
     const sensors=element("div","sensor-grid");for(const [name,value] of Object.entries(node.data||{}))valueCell(sensors,name.toUpperCase(),value);card.append(sensors);
-    const meta=element("div","meta-grid"),values=node.meta||{};for(const name of META_FIELDS){let value=values[name];if(name==="via"&&Array.isArray(value))value=value.length?value.join(" → "):"DIRECT";else if(Array.isArray(value))value=value.join(" / ");if(name==="level"&&Number.isFinite(value))value=`L${value}`;if(name==="fallback"&&value!==undefined&&value!==null)value=value?"備援中":"主線";valueCell(meta,name.toUpperCase(),value);}card.append(meta);
+    const meta=element("div","meta-grid"),values=radioMetaForDisplay(node.meta);for(const name of META_FIELDS){let value=values[name];if(name==="via"&&Array.isArray(value))value=value.length?value.join(" → "):"DIRECT";else if(Array.isArray(value))value=value.join(" / ");if(name==="level"&&Number.isFinite(value))value=`L${value}`;if(name==="fallback"&&value!==undefined&&value!==null)value=value?"備援中":"主線";valueCell(meta,name.toUpperCase(),value);}card.append(meta);
     card.append(element("div","foot",`LAST SEEN: ${formatTime(node.last_seen)} · EVENT: ${formatTime(node.recorded_at)}`));card.addEventListener("click",()=>openChart(id));grid.append(card);
   }
   const online=response.status==="online";statusBadge.className=`badge${online?" online":""}`;statusBadge.textContent=online?"SYSTEM.ONLINE":"SYSTEM.OFFLINE";
