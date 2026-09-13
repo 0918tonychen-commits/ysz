@@ -11,4 +11,8 @@ __pycache__/
 .claude/
 .pytest_cache/
 .test-tmp-run/
+.test-tmp-summary/
+.venv-1/
+.arduino_audit/
+.arduino_verify/
 
