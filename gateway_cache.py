@@ -12,7 +12,9 @@ from typing import Any
 import requests
 
 _backend_url = ""
+_mirror_backend_url = ""
 _api_key = ""
+_site_bypass_token = ""
 _local_db = "gateway_cache.db"
 _max_rows = 5000
 _max_dead_letter = 500
@@ -39,13 +41,26 @@ def _connect() -> sqlite3.Connection:
 
 
 def configure(
-    backend_url: str, local_db: str = "gateway_cache.db", api_key: str = ""
+    backend_url: str,
+    local_db: str = "gateway_cache.db",
+    api_key: str = "",
+    mirror_backend_url: str = "",
+    site_bypass_token: str = "",
 ) -> None:
-    global _backend_url, _local_db, _api_key
+    global _backend_url, _mirror_backend_url, _local_db, _api_key, _site_bypass_token
     _backend_url = backend_url.rstrip("/")
+    _mirror_backend_url = mirror_backend_url.rstrip("/")
     _local_db = local_db
     _api_key = api_key
+    _site_bypass_token = site_bypass_token
     init_local_cache()
+
+
+def _request_headers(*, mirror: bool = False) -> dict[str, str]:
+    headers = {"X-API-Key": _api_key} if _api_key else {}
+    if mirror and _site_bypass_token:
+        headers["OAI-Sites-Authorization"] = f"Bearer {_site_bypass_token}"
+    return headers
 
 
 def init_local_cache() -> None:
@@ -246,32 +261,62 @@ def save_to_local_cache(
 def _post(envelope: dict[str, Any], timeout: float) -> requests.Response:
     if not _backend_url:
         raise TelemetryDeliveryError("gateway cache backend URL is not configured")
-    headers = {"X-API-Key": _api_key} if _api_key else {}
-    return requests.post(_backend_url, json=envelope, headers=headers, timeout=timeout)
+    primary = requests.post(
+        _backend_url, json=envelope, headers=_request_headers(), timeout=timeout
+    )
+    if not 200 <= primary.status_code < 300 or not _mirror_backend_url:
+        return primary
+    mirror = requests.post(
+        _mirror_backend_url,
+        json=envelope,
+        headers=_request_headers(mirror=True),
+        timeout=timeout,
+    )
+    if not 200 <= mirror.status_code < 300:
+        # A mirror configuration/authentication problem must not make us drop
+        # data that Render already accepted. The stable event_id makes retries
+        # idempotent on both backends.
+        raise requests.HTTPError(
+            f"mirror backend rejected telemetry: HTTP {mirror.status_code}"
+        )
+    return primary
 
 
-def _api_base() -> str:
-    if _backend_url.endswith("/update"):
-        return _backend_url[: -len("/update")]
-    return _backend_url
+def _api_base(backend_url: str) -> str:
+    if backend_url.endswith("/update"):
+        return backend_url[: -len("/update")]
+    return backend_url
+
+
+def _api_targets() -> list[tuple[str, dict[str, str]]]:
+    targets = [(_api_base(_backend_url), _request_headers())] if _backend_url else []
+    if _mirror_backend_url:
+        targets.append(
+            (_api_base(_mirror_backend_url), _request_headers(mirror=True))
+        )
+    return targets
 
 
 def fetch_pending_commands(timeout: float = 3.0) -> list[dict[str, Any]]:
-    """Claim queued downlink commands from the backend for delivery over serial."""
-    if not _backend_url:
-        return []
-    headers = {"X-API-Key": _api_key} if _api_key else {}
-    try:
-        response = requests.get(
-            f"{_api_base()}/api/commands/pending", headers=headers, timeout=timeout
-        )
-        if response.status_code == 200:
-            commands = response.json().get("commands", [])
-            if isinstance(commands, list):
-                return commands
-    except (requests.RequestException, ValueError) as exc:
-        print(f"WARNING: command poll failed: {exc}")
-    return []
+    """Claim queued downlink commands from both backends for serial delivery."""
+    commands_by_id: dict[str, dict[str, Any]] = {}
+    for base_url, headers in _api_targets():
+        try:
+            response = requests.get(
+                f"{base_url}/api/commands/pending",
+                headers=headers,
+                timeout=timeout,
+            )
+            if response.status_code == 200:
+                commands = response.json().get("commands", [])
+                if isinstance(commands, list):
+                    for command in commands:
+                        if isinstance(command, dict):
+                            key = str(command.get("cmd_id") or id(command))
+                            commands_by_id.setdefault(key, command)
+        except (requests.RequestException, ValueError) as exc:
+            print(f"WARNING: command poll failed for {base_url}: {exc}")
+    return list(commands_by_id.values())
 
 
 def report_dispatch_failure(
@@ -283,22 +328,19 @@ def report_dispatch_failure(
     failure here costs a clearer status, not correctness. It is deliberately not
     persisted for retry — the command is not being redelivered either.
     """
-    if not _backend_url:
-        return False
-    headers = {"X-API-Key": _api_key} if _api_key else {}
-    try:
-        response = requests.post(
-            f"{_api_base()}/api/commands/dispatch_failed",
-            json={"node": node, "cmd_id": cmd_id, "reason": reason[:200]},
-            headers=headers,
-            timeout=timeout,
-        )
-        if 200 <= response.status_code < 300:
-            return True
-        print(f"WARNING: dispatch failure report rejected: HTTP {response.status_code}")
-    except requests.RequestException as exc:
-        print(f"WARNING: dispatch failure report failed: {exc}")
-    return False
+    accepted = False
+    for base_url, headers in _api_targets():
+        try:
+            response = requests.post(
+                f"{base_url}/api/commands/dispatch_failed",
+                json={"node": node, "cmd_id": cmd_id, "reason": reason[:200]},
+                headers=headers,
+                timeout=timeout,
+            )
+            accepted = accepted or 200 <= response.status_code < 300
+        except requests.RequestException as exc:
+            print(f"WARNING: dispatch failure report failed for {base_url}: {exc}")
+    return accepted
 
 
 def report_command_ack(
@@ -313,26 +355,34 @@ def report_command_ack(
     if not _backend_url:
         _save_command_ack(node, cmd_id, result, rssi, snr, "backend not configured")
         return False
-    headers = {"X-API-Key": _api_key} if _api_key else {}
     body: dict[str, Any] = {"node": node, "cmd_id": cmd_id, "result": result}
     if rssi is not None:
         body["rssi"] = rssi
     if snr is not None:
         body["snr"] = snr
-    try:
-        response = requests.post(
-            f"{_api_base()}/api/commands/ack", json=body, headers=headers, timeout=timeout
-        )
-        if 200 <= response.status_code < 300:
-            _delete_command_ack(cmd_id)
-            return True
-        error = f"HTTP {response.status_code}"
-        if response.status_code in ACK_PERMANENT_STATUSES:
-            print(f"ERROR: permanently rejected command ACK {cmd_id}: {error}")
-            _delete_command_ack(cmd_id)
-            return False
-    except requests.RequestException as exc:
-        error = str(exc)
+    errors: list[str] = []
+    transient = False
+    for base_url, headers in _api_targets():
+        try:
+            response = requests.post(
+                f"{base_url}/api/commands/ack",
+                json=body,
+                headers=headers,
+                timeout=timeout,
+            )
+            if 200 <= response.status_code < 300:
+                _delete_command_ack(cmd_id)
+                return True
+            errors.append(f"{base_url}: HTTP {response.status_code}")
+            transient = transient or response.status_code not in ACK_PERMANENT_STATUSES
+        except requests.RequestException as exc:
+            errors.append(f"{base_url}: {exc}")
+            transient = True
+    error = "; ".join(errors) or "backend not configured"
+    if not transient:
+        print(f"ERROR: permanently rejected command ACK {cmd_id}: {error}")
+        _delete_command_ack(cmd_id)
+        return False
     print(f"WARNING: command ACK report failed: {error}")
     _save_command_ack(node, cmd_id, result, rssi, snr, error)
     return False

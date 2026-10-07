@@ -19,8 +19,10 @@ load_dotenv()
 COM_PORT = os.environ.get("LORA_COM_PORT", "COM5")
 BAUD_RATE = int(os.environ.get("LORA_BAUD_RATE", "115200"))
 BACKEND_URL = os.environ.get("BACKEND_URL", "https://ysz.onrender.com/update")
+MIRROR_BACKEND_URL = os.environ.get("MIRROR_BACKEND_URL", "")
 LOCAL_DB = os.environ.get("GATEWAY_CACHE_DB", "gateway_cache.db")
 API_KEY = os.environ.get("LORA_API_KEY", "")
+SITE_BYPASS_TOKEN = os.environ.get("SITES_BYPASS_TOKEN", "")
 ACK_QUEUE_SIZE = int(os.environ.get("ACK_QUEUE_SIZE", "128"))
 SHUTDOWN_DRAIN_SECONDS = float(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "10"))
 OUTBOX_FAILURE_LIMIT = int(os.environ.get("OUTBOX_FAILURE_LIMIT", "5"))
@@ -402,7 +404,13 @@ class Gateway:
                 buffer = self._consume(buffer, chunk)
 
     def run(self) -> None:
-        gateway_cache.configure(BACKEND_URL, LOCAL_DB, API_KEY)
+        gateway_cache.configure(
+            BACKEND_URL,
+            LOCAL_DB,
+            API_KEY,
+            MIRROR_BACKEND_URL,
+            SITE_BYPASS_TOKEN,
+        )
         pending = gateway_cache.cache_count()
         quarantined = gateway_cache.dead_letter_count()
         print(

@@ -81,6 +81,63 @@ def test_fetch_pending_commands_returns_list(tmp_path, monkeypatch):
     assert captured["headers"] == {"X-API-Key": "secret"}
 
 
+def test_dual_write_requires_both_backends_before_deleting(tmp_path, monkeypatch):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure(
+        "https://primary.invalid/update",
+        str(database),
+        "secret",
+        mirror_backend_url="https://mirror.invalid/update",
+        site_bypass_token="site-token",
+    )
+    gateway_cache.save_to_local_cache(
+        "s05", {"data": {"t": 25.0}, "meta": {}}, event_id="dual-0001"
+    )
+    calls = []
+    mirror_statuses = iter([503, 204])
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append((url, headers))
+        if "mirror.invalid" in url:
+            return Response(next(mirror_statuses))
+        return Response(204)
+
+    monkeypatch.setattr(gateway_cache.requests, "post", fake_post)
+    assert gateway_cache.flush_local_cache() == 0
+    assert gateway_cache.cache_count() == 1
+    assert gateway_cache.flush_local_cache() == 1
+    assert gateway_cache.cache_count() == 0
+    assert calls[0] == ("https://primary.invalid/update", {"X-API-Key": "secret"})
+    assert calls[1] == (
+        "https://mirror.invalid/update",
+        {
+            "X-API-Key": "secret",
+            "OAI-Sites-Authorization": "Bearer site-token",
+        },
+    )
+
+
+def test_command_poll_combines_primary_and_mirror(tmp_path, monkeypatch):
+    database = tmp_path / "cache.db"
+    gateway_cache.configure(
+        "https://primary.invalid/update",
+        str(database),
+        "secret",
+        mirror_backend_url="https://mirror.invalid/update",
+        site_bypass_token="site-token",
+    )
+
+    def fake_get(url, headers=None, timeout=None):
+        cmd_id = "R1" if "primary.invalid" in url else "S1"
+        return Response(200, {"commands": [{"cmd_id": cmd_id, "node": "s03"}]})
+
+    monkeypatch.setattr(gateway_cache.requests, "get", fake_get)
+    assert [item["cmd_id"] for item in gateway_cache.fetch_pending_commands()] == [
+        "R1",
+        "S1",
+    ]
+
+
 def test_fetch_pending_commands_swallows_network_errors(tmp_path, monkeypatch):
     database = tmp_path / "cache.db"
     gateway_cache.configure("https://backend.invalid/update", str(database))
