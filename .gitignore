@@ -15,4 +15,5 @@ __pycache__/
 .venv-1/
 .arduino_audit/
 .arduino_verify/
-
+.arduino_build/
+*.log

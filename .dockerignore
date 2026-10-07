@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+.pytest_cache
+*.pyc
+*.db
+*.log
+.env
+.arduino_build
+.staging
+firmware
+docs
+tests

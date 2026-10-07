@@ -1,7 +1,18 @@
 # YZC LoRa 環境監測
 
 本專案包含 Windows Python Gateway、SQLite store-and-forward、Flask/PostgreSQL
-後端與瀏覽器監控頁面。Arduino 韌體目前不在此 repository。
+後端與瀏覽器監控頁面。正式 S05 韌體位於 `firmware/S05_from_S03/`；另一份
+備援中繼實作不同的歷史候選版本保留於 `.staging/S05_node_firmware/`。
+
+## 系統資料流
+
+```text
+Arduino 感測節點 → LoRa 中繼 → Windows Gateway → SQLite outbox
+                                         ↓
+瀏覽器監控頁面 ← Flask API ← PostgreSQL ← HTTP 上傳
+                                         ↓
+                              指令輪詢／ACK 回報
+```
 
 ## 資料協定
 
@@ -46,6 +57,26 @@ Copy-Item .env.example .env
 ```powershell
 $env:LORA_API_KEY = python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+## 本機後端與資料庫
+
+已安裝 Docker Desktop 的電腦可以用一個指令啟動 PostgreSQL 和網站：
+
+```powershell
+$env:LORA_API_KEY = "僅供本機開發的密鑰"
+docker compose up --build
+```
+
+等待 `website` healthy 後，在另一個終端執行端到端 smoke test：
+
+```powershell
+$env:LORA_API_KEY = "僅供本機開發的密鑰"
+python scripts/e2e_smoke.py
+```
+
+測試會實際驗證資料庫健康狀態、API 驗證、遙測寫入、`event_id` 去重與資料讀回。
+停止服務使用 `docker compose down`；只有確定不再需要本機資料時才使用
+`docker compose down --volumes`。
 
 ## 執行
 
@@ -103,3 +134,16 @@ pytest -q
 ```
 
 測試不需要真實序列埠、Neon 或 Render。
+
+## Arduino 韌體狀態
+
+目前的 MKR WAN 1310（`arduino:samd:mkrwan1310`）S05 韌體為：
+
+- `firmware/S05_from_S03/S05_from_S03.ino`：正式版本，使用記憶體中的主／備中繼切換。
+- `.staging/S05_node_firmware/S05_node_firmware.ino`：歷史候選版，把主／備中繼與切換狀態寫入 Flash。
+
+兩份都曾經編譯，但 `.arduino_build/` 是產生物，不是原始碼，之後不應再新增進
+Git。兩版的 Flash 設定格式與備援路由行為不同，不應混用。
+
+實機驗收至少要確認：感測器讀值、LoRa 上行、中繼備援、Gateway 斷線補傳、後端
+去重、下行命令與 ACK。軟體測試通過不能取代射頻、供電、天線與序列埠測試。

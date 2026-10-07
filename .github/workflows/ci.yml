@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-and-http:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ysz
+          POSTGRES_PASSWORD: ysz-ci
+          POSTGRES_DB: ysz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ysz -d ysz"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      DATABASE_URL: postgresql://ysz:ysz-ci@127.0.0.1:5432/ysz
+      LORA_API_KEY: ysz-ci-only
+      DISCORD_WEBHOOK_URL: ""
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --requirement requirements.txt
+      - run: pytest -q
+      - name: Start website
+        run: |
+          gunicorn --bind 127.0.0.1:10000 --workers 1 main:app > /tmp/ysz-gunicorn.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:10000/healthz && exit 0
+            sleep 1
+          done
+          sed -n '1,240p' /tmp/ysz-gunicorn.log
+          exit 1
+      - run: python scripts/e2e_smoke.py
+      - run: docker build --tag ysz-web:test .
