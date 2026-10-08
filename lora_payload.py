@@ -23,7 +23,6 @@ INLINE_PAIR_RE = re.compile(
     r"^([a-z][a-z0-9_]*)\s*[:=]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))$",
     re.IGNORECASE,
 )
-ACK_FIELD_RE = re.compile(r"(\w+)\s*=\s*([^,]+)")
 # boot_id is the one non-numeric meta field: a random value minted at every cold
 # boot, which is what separates a genuine restart from a dropped packet.
 BOOT_ID_RE = re.compile(r"^[0-9A-Fa-f]{4,32}$")
@@ -294,25 +293,3 @@ def parse_payload(
         meta["loss"] = 0.0
 
     return node, {"data": data, "meta": meta}, "valid"
-
-
-def parse_ack_line(line: str) -> dict[str, Any] | None:
-    """Parse an L1 gateway ACK line: ``from=s03, cmdId=C001, result=OK, rssi=-65, snr=6.1``.
-
-    Unlike sensor uplinks this is a plain ``key=value`` list, not the
-    positional comma format ``parse_payload`` expects.
-    """
-    fields = dict(ACK_FIELD_RE.findall(line))
-    node = fields.get("from", "").strip().lower()
-    cmd_id = fields.get("cmdId", "").strip()
-    result = fields.get("result", "").strip()
-    if not node or not NODE_RE.fullmatch(node) or not cmd_id or not result:
-        return None
-    ack: dict[str, Any] = {"node": node, "cmd_id": cmd_id, "result": result}
-    rssi = fields.get("rssi", "").strip()
-    if rssi and NUMBER_RE.fullmatch(rssi):
-        ack["rssi"] = int(float(rssi))
-    snr = fields.get("snr", "").strip()
-    if snr and NUMBER_RE.fullmatch(snr):
-        ack["snr"] = float(snr)
-    return ack

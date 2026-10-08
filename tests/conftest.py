@@ -13,3 +13,4 @@ os.environ["DATABASE_URL"] = "postgresql://fake/db"
 os.environ["LORA_API_KEY"] = "test-key-123"
 os.environ["DISCORD_WEBHOOK_URL"] = ""  # never hit a real webhook from tests
 os.environ["BACKEND_URL"] = "https://backend.invalid/update"
+os.environ["LORA_COM_PORT"] = "COM5"

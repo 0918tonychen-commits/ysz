@@ -16,4 +16,5 @@ __pycache__/
 .arduino_audit/
 .arduino_verify/
 .arduino_build/
+.firmware-validation/
 *.log

@@ -79,7 +79,7 @@ struct NodeConfig {
 // 發送端版本使用新的 magic，讓已燒過舊韌體的板子只在第一次開機時
 // 重新套用 s05 -> s04 / L3 設定。
 // 更换 magic，强制清掉曾经烧入板内的 10 秒测试设定。
-#define CONFIG_MAGIC 0xC0FFEE57
+#define CONFIG_MAGIC 0xC0FFEE55
 
 FlashStorage(configStore, NodeConfig);
 NodeConfig cfg;

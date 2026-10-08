@@ -1,5 +1,5 @@
 
-//  LoRa 上行韌體 - S05 單跳 ACK 嚴格備援版
+//  LoRa 上行韌體 - S03 單跳 ACK 嚴格備援版
 //  適用板子:SAMD 系列 (Wio、XIAO 等,需有 FlashStorage)
 // =================================================================
 //  保留感測資料上行、CAD 中繼、睡眠、boot_id 與 mcount。
@@ -25,9 +25,9 @@ PacketKind classifyPacket(const String& body);
 // 首次燒錄預設值。單向上行版若要修改，需重新燒錄或更新 Flash 設定。
 // =================================================================
 #define DEFAULT_IS_ROUTER   false
-#define DEFAULT_NODE_ID     "s05"
-#define DEFAULT_TARGET      "s04"
-#define DEFAULT_BACKUP      "s02"
+#define DEFAULT_NODE_ID     "s03"
+#define DEFAULT_TARGET      "s02"
+#define DEFAULT_BACKUP      "s04"
 #define DEFAULT_LEVEL       3
 #define DEFAULT_INTERVAL_MS 300000UL  // 發送端：每 5 分鐘送一次
 
@@ -79,7 +79,7 @@ struct NodeConfig {
 // 發送端版本使用新的 magic，讓已燒過舊韌體的板子只在第一次開機時
 // 重新套用 s05 -> s04 / L3 設定。
 // 更换 magic，强制清掉曾经烧入板内的 10 秒测试设定。
-#define CONFIG_MAGIC 0xC0FFEE57
+#define CONFIG_MAGIC 0xC0FFEE53
 
 FlashStorage(configStore, NodeConfig);
 NodeConfig cfg;
@@ -396,7 +396,7 @@ void setup() {
   Serial.println("\n=====================================");
   Serial.print("🚀 節點啟動: ");   Serial.println(cfg.nodeID);
   Serial.print("🔑 bootId: ");     Serial.println(bootId);
-  Serial.println("📦 韌體版本: S05_HOP_ACK_FAILOVER_6");
+  Serial.println("📦 韌體版本: S03_HOP_ACK_FAILOVER_6");
   Serial.print("👑 直屬長官: ");   Serial.println(cfg.targetNode);
   if (!cfg.isRouter) {
     Serial.print("🛟 備援長官: "); Serial.println(DEFAULT_BACKUP);

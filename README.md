@@ -1,8 +1,8 @@
 # YZC LoRa 環境監測
 
 本專案包含 Windows Python Gateway、SQLite store-and-forward、Flask/PostgreSQL
-後端與瀏覽器監控頁面。正式 S05 韌體位於 `firmware/S05_from_S03/`；另一份
-備援中繼實作不同的歷史候選版本保留於 `.staging/S05_node_firmware/`。
+後端與瀏覽器監控頁面。正式「上行為主、只保留單跳 ACK 備援」的 S05 韌體位於
+`firmware/S05_from_S03/`。
 
 ## 系統資料流
 
@@ -10,8 +10,6 @@
 Arduino 感測節點 → LoRa 中繼 → Windows Gateway → SQLite outbox
                                          ↓
 瀏覽器監控頁面 ← Flask API ← PostgreSQL ← HTTP 上傳
-                                         ↓
-                              指令輪詢／ACK 回報
 ```
 
 ## 資料協定
@@ -137,13 +135,13 @@ pytest -q
 
 ## Arduino 韌體狀態
 
-目前的 MKR WAN 1310（`arduino:samd:mkrwan1310`）S05 韌體為：
+目前的 MKR WAN 1310（`arduino:samd:mkrwan1310`）韌體配置為：
 
-- `firmware/S05_from_S03/S05_from_S03.ino`：正式版本，使用記憶體中的主／備中繼切換。
-- `.staging/S05_node_firmware/S05_node_firmware.ino`：歷史候選版，把主／備中繼與切換狀態寫入 Flash。
+- `firmware/S05_from_S03/S05_from_S03.ino`：正式 S05，只有中繼 ACK，沒有控制下行。
+- 桌面專題 `node_firmware_2_/templates/`：S02～S05 的完整燒錄範本。
 
-兩份都曾經編譯，但 `.arduino_build/` 是產生物，不是原始碼，之後不應再新增進
-Git。兩版的 Flash 設定格式與備援路由行為不同，不應混用。
+`.arduino_build/` 是產生物，不是原始碼，之後不應加入 Git。舊版下行韌體的
+還原方式記錄在 `firmware/archive/S05_DOWNLINK_VERSION.md`。
 
-實機驗收至少要確認：感測器讀值、LoRa 上行、中繼備援、Gateway 斷線補傳、後端
-去重、下行命令與 ACK。軟體測試通過不能取代射頻、供電、天線與序列埠測試。
+實機驗收至少要確認：感測器讀值、LoRa 上行、單跳 ACK、嚴格主備切換、Gateway
+斷線補傳及後端去重。軟體測試通過不能取代射頻、供電、天線與序列埠測試。

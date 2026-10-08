@@ -2,7 +2,7 @@
 
 Telemetry is write-ahead logged: the reader writes every packet to SQLite and
 the uploader drains that outbox, so nothing lives only in memory. These cover
-the reader's framing, the drop tally, ACK decoupling, and the fail-fast path.
+the reader's framing, the drop tally, reconnect behavior, and the fail-fast path.
 """
 
 import sys
@@ -203,69 +203,10 @@ def test_oversized_fragment_is_cleared_across_reads(capsys):
     assert handled[-1] == "數據: s10_m9, t, 25.0"
 
 
-def test_ack_does_not_block_the_reader_on_http(monkeypatch):
-    """An ACK used to cost the reader a full HTTP timeout of serial silence."""
-    gateway = bridge.Gateway()
-    reported = []
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "report_command_ack",
-        lambda *args, **kwargs: reported.append(args) or True,
-    )
-
-    gateway._handle_line("【ACK】from=s03, cmdId=C001, result=OK, rssi=-65, snr=6.1")
-
-    # Queued, not sent: nothing touched the network on this thread.
-    assert reported == []
-    assert gateway.ack_queue.qsize() == 1
-
-    gateway._drain_ack_queue(deliver=True)
-    assert reported == [("s03", "C001", "OK")]
-    assert gateway.ack_queue.empty()
 
 
-def test_ack_queue_overflow_persists_instead_of_posting(monkeypatch):
-    gateway = bridge.Gateway()
-    saved = []
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "report_command_ack",
-        lambda *a, **k: pytest.fail("the reader thread must not post"),
-    )
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "save_command_ack_for_retry",
-        lambda node, cmd_id, result, **kwargs: saved.append((node, cmd_id, result)),
-    )
-    for _ in range(bridge.ACK_QUEUE_SIZE):
-        gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C0", "result": "OK"})
-
-    gateway._handle_line("【ACK】from=s03, cmdId=C999, result=OK")
-
-    assert saved == [("s03", "C999", "OK")]
 
 
-def test_poller_persists_queued_acks_on_shutdown(monkeypatch):
-    gateway = bridge.Gateway()
-    saved = []
-    monkeypatch.setattr(
-        bridge.gateway_cache, "flush_command_acks", lambda: 0
-    )
-    monkeypatch.setattr(
-        bridge.gateway_cache, "fetch_pending_commands", lambda: []
-    )
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "save_command_ack_for_retry",
-        lambda node, cmd_id, result, **kwargs: saved.append((node, cmd_id, result)),
-    )
-    gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C7", "result": "OK"})
-    gateway.stop_event.set()
-
-    gateway._command_poller()
-
-    # An ACK still in memory at shutdown becomes durable rather than vanishing.
-    assert saved == [("s03", "C7", "OK")]
 
 
 # --- coordinated fail-fast ----------------------------------------------------
@@ -280,83 +221,12 @@ def test_first_fatal_reason_wins(capsys):
     assert gateway.stop_event.is_set()
 
 
-def test_serial_write_failure_is_reported_not_just_logged(monkeypatch):
-    """The backend already marked it 'sent'; silence would leave that lie."""
-    gateway = bridge.Gateway()
-    reported = []
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "report_dispatch_failure",
-        lambda node, cmd_id, reason: reported.append((node, cmd_id, reason)),
-    )
-
-    class DeadPort:
-        def write_line(self, line):
-            raise bridge.serial.SerialException("port unavailable")
-
-    gateway.serial_writer = DeadPort()
-    gateway._dispatch_command(
-        {"cmd_id": "Cabc", "node": "s03", "cmd": "REBOOT", "arg": ""}
-    )
-
-    assert reported == [("s03", "Cabc", "port unavailable")]
 
 
-def test_dispatch_without_a_serial_port_is_reported(monkeypatch):
-    gateway = bridge.Gateway()
-    reported = []
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "report_dispatch_failure",
-        lambda node, cmd_id, reason: reported.append((node, cmd_id, reason)),
-    )
-    gateway.serial_writer = None
-    gateway._dispatch_command({"cmd_id": "Cabc", "node": "s03", "cmd": "PING"})
-
-    assert reported == [("s03", "Cabc", "serial port not open")]
 
 
-def test_successful_dispatch_reports_nothing(monkeypatch):
-    gateway = bridge.Gateway()
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "report_dispatch_failure",
-        lambda *a: pytest.fail("a delivered command must not be marked failed"),
-    )
-    written = []
-
-    class Port:
-        def write_line(self, line):
-            written.append(line)
-
-    gateway.serial_writer = Port()
-    gateway._dispatch_command(
-        {"cmd_id": "Cabc", "node": "s03", "cmd": "SET_LEVEL", "arg": "2"}
-    )
-
-    assert written == ["CMD Cabc s03 SET_LEVEL 2"]
 
 
-def test_shutdown_cleanup_cannot_mask_the_real_cause(monkeypatch, capsys):
-    """A failing drain must not replace the exception that ended the run."""
-    _prepare_run(monkeypatch)
-
-    gateway = bridge.Gateway()
-    def fail_delivery():
-        raise bridge.gateway_cache.TelemetryDeliveryError("outbox failed")
-
-    monkeypatch.setattr(gateway, "_read_serial", fail_delivery)
-    monkeypatch.setattr(
-        gateway,
-        "_drain_ack_queue",
-        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("drain blew up")),
-    )
-
-    with pytest.raises(bridge.gateway_cache.TelemetryDeliveryError, match="outbox failed"):
-        gateway.run()
-
-    out = capsys.readouterr().out
-    assert "could not persist queued ACKs on shutdown: drain blew up" in out
 
 
 # --- the outbox is the only telemetry path ------------------------------------
@@ -423,94 +293,6 @@ def test_a_network_outage_is_not_an_outbox_failure(monkeypatch):
     gateway._uploader()
 
     assert gateway.fatal_reason is None
-
-
-# --- the command plane must survive its own failures --------------------------
-
-def test_poller_survives_an_unexpected_failure(monkeypatch, capsys):
-    """One bad cycle must not end commands and ACKs for the rest of the run."""
-    gateway = bridge.Gateway()
-    monkeypatch.setattr(bridge, "COMMAND_POLL_INTERVAL", 0.001)
-    cycles = []
-
-    def flaky():
-        cycles.append(True)
-        if len(cycles) == 1:
-            raise RuntimeError("something unforeseen")
-        if len(cycles) == 3:
-            gateway.stop_event.set()
-        return 0
-
-    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", flaky)
-    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", lambda: [])
-    gateway._command_poller()
-
-    # It kept going after the exception rather than dying silently.
-    assert len(cycles) == 3
-    assert "command plane cycle failed (1x): something unforeseen" in capsys.readouterr().out
-
-
-def test_poller_failure_is_not_fatal(monkeypatch):
-    """Telemetry does not run through here, so a broken command plane degrades."""
-    gateway = bridge.Gateway()
-    monkeypatch.setattr(bridge, "COMMAND_POLL_INTERVAL", 0.001)
-    calls = []
-
-    def always_broken():
-        calls.append(True)
-        if len(calls) == 5:
-            gateway.stop_event.set()
-        raise RuntimeError("command plane is down")
-
-    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", always_broken)
-    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", lambda: [])
-    gateway._command_poller()
-
-    assert gateway.fatal_reason is None
-    assert not gateway.stop_event.is_set() or len(calls) == 5
-
-
-def test_repeated_poller_failures_are_not_logged_every_cycle(monkeypatch, capsys):
-    gateway = bridge.Gateway()
-    monkeypatch.setattr(bridge, "COMMAND_POLL_INTERVAL", 0.001)
-    monkeypatch.setattr(bridge, "COMMAND_FAILURE_REPORT_EVERY", 5)
-    calls = []
-
-    def always_broken():
-        calls.append(True)
-        if len(calls) == 12:
-            gateway.stop_event.set()
-        raise RuntimeError("still down")
-
-    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", always_broken)
-    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", lambda: [])
-    gateway._command_poller()
-
-    # 12 failures, reported at the 1st, 5th and 10th — not twelve times.
-    assert capsys.readouterr().out.count("command plane cycle failed") == 3
-
-
-def test_a_failed_ack_delivery_is_persisted_not_dropped(monkeypatch, capsys):
-    """It is already off the queue: the error handling must not lose it."""
-    gateway = bridge.Gateway()
-    saved = []
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "report_command_ack",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("resolver exploded")),
-    )
-    monkeypatch.setattr(
-        bridge.gateway_cache,
-        "save_command_ack_for_retry",
-        lambda node, cmd_id, result, **kwargs: saved.append((node, cmd_id, result)),
-    )
-    gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C7", "result": "OK"})
-
-    gateway._drain_ack_queue(deliver=True)
-
-    assert saved == [("s03", "C7", "OK")]
-    assert "ACK C7 not delivered" in capsys.readouterr().out
-    assert gateway.ack_queue.empty()
 
 
 @pytest.mark.parametrize("failure_stage", ["open", "in_waiting", "read"])
@@ -612,97 +394,12 @@ def test_reconnect_discards_fragment_and_preserves_boot_tracker(monkeypatch):
     assert gateway.dropped == {"s03/duplicate": 1}
 
 
-def test_disconnected_poller_delivers_acks_without_claiming_commands(monkeypatch):
-    gateway = bridge.Gateway()
-    reports = []
-    gateway.ack_queue.put_nowait({"node": "s03", "cmd_id": "C8", "result": "OK"})
-    monkeypatch.setattr(
-        bridge.gateway_cache, "report_command_ack",
-        lambda *a, **k: reports.append(a),
-    )
-    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", lambda: 0)
-    monkeypatch.setattr(
-        bridge.gateway_cache, "fetch_pending_commands",
-        lambda: pytest.fail("must not claim commands while offline"),
-    )
-    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: gateway.stop_event.set())
-    gateway._command_poller()
-    assert reports == [("s03", "C8", "OK")]
 
 
-def test_write_failure_triggers_reconnect_without_replaying_command(monkeypatch):
-    _prepare_run(monkeypatch)
-    gateway = bridge.Gateway()
-    writes = []
-    reports = []
-    opened = []
-
-    class Port:
-        is_open = True
-        in_waiting = 1
-
-        def write(self, data):
-            writes.append(data)
-            raise bridge.serial.SerialException("USB write failed")
-
-        def read(self, size):
-            # A downlink can run while a read is active (no lock starvation).
-            if len(opened) == 1:
-                gateway._dispatch_command({"cmd_id": "C9", "node": "s03", "cmd": "REBOOT"})
-            else:
-                gateway.stop_event.set()
-            return b""
-
-        def close(self):
-            self.is_open = False
-
-    def connect(*args, **kwargs):
-        port = Port()
-        opened.append(port)
-        return port
-
-    monkeypatch.setattr(bridge.serial, "Serial", connect)
-    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: False)
-    monkeypatch.setattr(
-        bridge.gateway_cache, "report_dispatch_failure",
-        lambda *args: reports.append(args),
-    )
-    gateway.run()
-    assert len(opened) == 2
-    assert writes == [b"CMD C9 s03 REBOOT\n"]
-    assert reports == [("s03", "C9", "USB write failed")]
 
 
-def test_serial_writer_rejects_partial_write_without_unbounded_flush():
-    class PartialPort:
-        def write(self, data):
-            return len(data) - 1
-
-        def flush(self):
-            pytest.fail("unbounded flush must not be used")
-
-    with pytest.raises(bridge.serial.SerialException, match="incomplete"):
-        bridge.SerialWriter(PartialPort()).write_line("CMD C1 s03 PING")
 
 
-def test_disconnect_while_fetching_reports_claimed_command_once(monkeypatch):
-    gateway = bridge.Gateway()
-    reports = []
-    gateway.serial_writer = object()  # only used to observe connected state
-
-    def fetch():
-        gateway._close_serial()
-        return [{"cmd_id": "C10", "node": "s03", "cmd": "REBOOT"}]
-
-    monkeypatch.setattr(bridge.gateway_cache, "flush_command_acks", lambda: 0)
-    monkeypatch.setattr(bridge.gateway_cache, "fetch_pending_commands", fetch)
-    monkeypatch.setattr(
-        bridge.gateway_cache, "report_dispatch_failure",
-        lambda *args: reports.append(args),
-    )
-    monkeypatch.setattr(gateway.stop_event, "wait", lambda delay: gateway.stop_event.set())
-    gateway._command_poller()
-    assert reports == [("s03", "C10", "serial port not open")]
 
 
 def test_ctrl_c_during_serial_retry_exits_cleanly(monkeypatch, capsys):

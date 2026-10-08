@@ -8,14 +8,14 @@ sketch 目錄再由 Arduino IDE 或 Arduino CLI 編譯。
 
 - 節點：`s05`
 - 主中繼：`s04`
-- 備用中繼：`s02`
+- 單向上行目標：`s04`
 - 層級：L3
 - 上報週期：5 分鐘
 - LoRa 頻率：921 MHz
 
-`.staging/S05_node_firmware/` 是另一份歷史候選版本，不是正式燒錄來源。它會把
-備用中繼與切換狀態存入 Flash，資料結構和正式版不同，因此不可在未重新確認
-遷移行為前直接替換。
+目前正式版沒有 CMD、遠端設定或後端下行，只保留直屬中繼的單跳 ACK，供發送端
+以嚴格門檻自動切換主／備中繼。移除完整下行前的版本與還原方式記錄在
+`archive/S05_DOWNLINK_VERSION.md`。
 
-S01–S04 的原始碼目前只在開發者本機，尚未加入此 repository。在這些原始碼補齊
-之前，repository 只能完整重建 S05、Gateway 與後端，不能完整重建整個 LoRa 拓撲。
+S02～S05 的完整燒錄範本放在桌面專題資料夾的
+`node_firmware_2_/templates/`；此 repository 只保留正式 S05 與版本還原紀錄。

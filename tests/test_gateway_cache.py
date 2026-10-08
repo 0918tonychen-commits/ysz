@@ -64,21 +64,6 @@ def test_500_remains_cached_and_429_then_recovery(tmp_path, monkeypatch):
     assert gateway_cache.cache_count() == 0
 
 
-def test_fetch_pending_commands_returns_list(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-    captured = {}
-
-    def fake_get(url, headers=None, timeout=None):
-        captured["url"] = url
-        captured["headers"] = headers
-        return Response(200, {"commands": [{"cmd_id": "C1", "node": "s03", "cmd": "PING", "arg": ""}]})
-
-    monkeypatch.setattr(gateway_cache.requests, "get", fake_get)
-    commands = gateway_cache.fetch_pending_commands()
-    assert commands == [{"cmd_id": "C1", "node": "s03", "cmd": "PING", "arg": ""}]
-    assert captured["url"] == "https://backend.invalid/api/commands/pending"
-    assert captured["headers"] == {"X-API-Key": "secret"}
 
 
 def test_dual_write_requires_both_backends_before_deleting(tmp_path, monkeypatch):
@@ -117,99 +102,16 @@ def test_dual_write_requires_both_backends_before_deleting(tmp_path, monkeypatch
     )
 
 
-def test_command_poll_combines_primary_and_mirror(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure(
-        "https://primary.invalid/update",
-        str(database),
-        "secret",
-        mirror_backend_url="https://mirror.invalid/update",
-        site_bypass_token="site-token",
-    )
-
-    def fake_get(url, headers=None, timeout=None):
-        cmd_id = "R1" if "primary.invalid" in url else "S1"
-        return Response(200, {"commands": [{"cmd_id": cmd_id, "node": "s03"}]})
-
-    monkeypatch.setattr(gateway_cache.requests, "get", fake_get)
-    assert [item["cmd_id"] for item in gateway_cache.fetch_pending_commands()] == [
-        "R1",
-        "S1",
-    ]
 
 
-def test_fetch_pending_commands_swallows_network_errors(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database))
-
-    def fail(*args, **kwargs):
-        raise gateway_cache.requests.Timeout("offline")
-
-    monkeypatch.setattr(gateway_cache.requests, "get", fail)
-    assert gateway_cache.fetch_pending_commands() == []
 
 
-def test_report_command_ack_posts_to_ack_endpoint(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-    captured = {}
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        captured["url"] = url
-        captured["json"] = json
-        return Response(200)
-
-    monkeypatch.setattr(gateway_cache.requests, "post", fake_post)
-    assert gateway_cache.report_command_ack("s03", "C1", "OK", rssi=-65, snr=6.1)
-    assert captured["url"] == "https://backend.invalid/api/commands/ack"
-    assert captured["json"] == {"node": "s03", "cmd_id": "C1", "result": "OK", "rssi": -65, "snr": 6.1}
 
 
-def test_failed_command_ack_is_persisted_and_retried(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-    responses = iter([Response(500), Response(200)])
-    monkeypatch.setattr(
-        gateway_cache.requests, "post", lambda *args, **kwargs: next(responses)
-    )
-
-    assert not gateway_cache.report_command_ack("s03", "C1", "OK")
-    with sqlite3.connect(database) as conn:
-        conn.execute("UPDATE command_ack_cache SET next_attempt=0")
-        assert conn.execute("SELECT COUNT(*) FROM command_ack_cache").fetchone()[0] == 1
-
-    assert gateway_cache.flush_command_acks() == 1
-    with sqlite3.connect(database) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM command_ack_cache").fetchone()[0] == 0
 
 
-def test_permanent_command_ack_error_is_not_retried(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-    monkeypatch.setattr(
-        gateway_cache.requests, "post", lambda *args, **kwargs: Response(404)
-    )
-
-    assert not gateway_cache.report_command_ack("s03", "C1", "OK")
-    with sqlite3.connect(database) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM command_ack_cache").fetchone()[0] == 0
 
 
-def test_command_ack_retry_uses_backoff(tmp_path, monkeypatch):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-    monkeypatch.setattr(
-        gateway_cache.requests, "post", lambda *args, **kwargs: Response(500)
-    )
-
-    gateway_cache.report_command_ack("s03", "C1", "OK")
-    assert gateway_cache.flush_command_acks() == 0
-    with sqlite3.connect(database) as conn:
-        retries, next_attempt, created_at = conn.execute(
-            "SELECT retries,next_attempt,created_at FROM command_ack_cache"
-        ).fetchone()
-    assert retries == 1
-    assert next_attempt >= created_at + 4.9
 
 
 def test_permanent_400_does_not_block_following_event(tmp_path, monkeypatch):
@@ -291,19 +193,6 @@ def test_legacy_database_is_migrated_and_the_backfill_is_idempotent(tmp_path):
         ).fetchall() == migrated
 
 
-def test_queued_ack_is_due_immediately_and_spends_no_retry(tmp_path):
-    database = tmp_path / "cache.db"
-    gateway_cache.configure("https://backend.invalid/update", str(database), "secret")
-
-    gateway_cache.save_command_ack_for_retry("s03", "C1", "OK", rssi=-65, snr=6.1)
-
-    with sqlite3.connect(database) as conn:
-        retries, next_attempt = conn.execute(
-            "SELECT retries,next_attempt FROM command_ack_cache WHERE cmd_id='C1'"
-        ).fetchone()
-    # It has not failed at anything yet, so no backoff and no attempt spent.
-    assert retries == 0
-    assert next_attempt == 0.0
 
 
 # --- the outbox: durable before delivery, not after a failed delivery --------

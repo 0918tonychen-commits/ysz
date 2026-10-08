@@ -1,4 +1,4 @@
-from lora_payload import MCountTracker, parse_ack_line, parse_payload
+from lora_payload import MCountTracker, parse_payload
 
 
 def test_normal_packet():
@@ -96,21 +96,10 @@ def test_multi_hop_rssi_and_snr_are_kept_per_hop_not_overwritten():
     assert payload["meta"]["snr"] == [5.0, 6.0]
 
 
-def test_parse_ack_line():
-    line = "【ACK】from=s03, cmdId=C001, result=OK, rssi=-65, snr=6.1"
-    ack = parse_ack_line(line)
-    assert ack == {"node": "s03", "cmd_id": "C001", "result": "OK", "rssi": -65, "snr": 6.1}
 
 
-def test_parse_ack_line_without_radio_metrics():
-    line = "【ACK】from=s03, cmdId=C002, result=ERR:BAD_ARG"
-    ack = parse_ack_line(line)
-    assert ack == {"node": "s03", "cmd_id": "C002", "result": "ERR:BAD_ARG"}
 
 
-def test_parse_ack_line_rejects_malformed():
-    assert parse_ack_line("【ACK】from=notanode, cmdId=C003, result=OK") is None
-    assert parse_ack_line("【路由】s03 via s02") is None
 
 
 def test_reboot_zero_after_grace_period():

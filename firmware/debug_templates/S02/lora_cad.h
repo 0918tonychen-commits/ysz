@@ -25,6 +25,7 @@
 // =================================================================
 #define CAD_IRQ_CAD_DETECTED   0x01
 #define CAD_IRQ_CAD_DONE       0x04
+#define CAD_IRQ_TX_DONE        0x08
 
 
 class LoRaCAD {
@@ -34,13 +35,24 @@ public:
   // ss 必須與 LoRa 函式庫使用的 NSS 相同
   // ---------------------------------------------------------------
   void begin(int ss) {
+#if defined(ARDUINO_SAMD_MKRWAN1300) || defined(ARDUINO_SAMD_MKRWAN1310)
+    (void)ss;
+    // MKR WAN routes the Murata radio through SPI1 at 200 kHz and uses the
+    // variant's dedicated chip-select pin.  SPI/SS addresses the wrong bus.
+    _ss = LORA_IRQ_DUMB;
+    _spi = &SPI1;
+    const uint32_t spiFrequency = 200000;
+#else
     _ss = ss;
+    _spi = &SPI;
+    const uint32_t spiFrequency = 8000000;
+#endif
 
     pinMode(_ss, OUTPUT);
     digitalWrite(_ss, HIGH);
 
     _spiSettings = SPISettings(
-      8000000,
+      spiFrequency,
       MSBFIRST,
       SPI_MODE0
     );
@@ -81,6 +93,29 @@ public:
   //   true  = 偵測到 LoRa 前導碼／活動
   //   false = 沒偵測到，或 CAD 逾時
   // ---------------------------------------------------------------
+  // Clear a stale TxDone before starting an asynchronous transmission.
+  void clearTxDone() {
+    writeReg(CAD_REG_IRQ_FLAGS, CAD_IRQ_TX_DONE);
+  }
+
+  // Poll only TxDone; parsePacket() would switch the radio out of TX mode.
+  // Both completion and timeout leave the radio in standby with clean IRQs.
+  bool waitForTxDone(uint32_t timeoutMs) {
+    const unsigned long startedAt = millis();
+    while ((unsigned long)(millis() - startedAt) < timeoutMs) {
+      const uint8_t flags = readReg(CAD_REG_IRQ_FLAGS);
+      if (flags != 0xFF && (flags & CAD_IRQ_TX_DONE)) {
+        enterStandby();
+        clearIrqFlags();
+        return true;
+      }
+      delay(1);
+    }
+    enterStandby();
+    clearIrqFlags();
+    return false;
+  }
+
   bool detectOnce(uint16_t timeoutMs = 50) {
     // 從 Sleep/RX 切到 Standby
     enterStandby();
@@ -188,6 +223,7 @@ private:
   int _ss = -1;
 
   SPISettings _spiSettings;
+  SPIClass* _spi = &SPI;
 
 
   // ---------------------------------------------------------------
@@ -218,16 +254,16 @@ private:
     uint8_t address,
     uint8_t value
   ) {
-    SPI.beginTransaction(_spiSettings);
+    _spi->beginTransaction(_spiSettings);
 
     digitalWrite(_ss, LOW);
 
-    SPI.transfer(address);
-    uint8_t response = SPI.transfer(value);
+    _spi->transfer(address);
+    uint8_t response = _spi->transfer(value);
 
     digitalWrite(_ss, HIGH);
 
-    SPI.endTransaction();
+    _spi->endTransaction();
 
     return response;
   }

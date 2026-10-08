@@ -1,4 +1,4 @@
-"""Flask command-control-plane tests.
+"""Flask telemetry, database, alert, and health endpoint tests.
 
 `main` connects to PostgreSQL and starts a monitor thread at import time, and
 the README promises the suite needs no Neon. So we stub ``psycopg.connect``
@@ -108,151 +108,48 @@ def sql_of(cursor):
     return " ".join(query for query, _ in cursor.executed)
 
 
-# --- auth + input validation (these return before any DB access) ------------
+# --- uplink-only surface -----------------------------------------------------
 
-def test_create_command_requires_auth():
+def test_downlink_command_endpoints_are_removed():
     with main.app.test_client() as client:
-        response = client.post("/api/commands", json={"node": "s03", "cmd": "PING"})
-    assert response.status_code == 401
+        assert client.post("/api/commands", json={}).status_code == 404
+        assert client.get("/api/commands").status_code == 404
+        assert client.get("/api/commands/pending").status_code == 404
+        assert client.post("/api/commands/ack", json={}).status_code == 404
 
 
-def test_create_command_rejects_bad_node():
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands", json={"node": "bad", "cmd": "PING"}, headers=AUTH
-        )
-    assert response.status_code == 400
-    assert response.get_json()["message"] == "invalid node"
+# --- database reconnect (Neon drops idle connections) -----------------------
 
 
-def test_create_command_rejects_cmd_outside_allowlist():
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands", json={"node": "s03", "cmd": "DROP_TABLE"}, headers=AUTH
-        )
-    assert response.status_code == 400
-    assert response.get_json()["message"] == "invalid cmd"
 
 
-def test_create_command_rejects_arg_with_separators():
-    # A comma/space in arg would corrupt the comma-delimited LoRa command frame.
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands",
-            json={"node": "s03", "cmd": "SET_TARGET", "arg": "s05,evil"},
-            headers=AUTH,
-        )
-    assert response.status_code == 400
-    assert response.get_json()["message"] == "invalid arg"
+
+
+
 
 
 # --- happy paths driven through the fake DB ---------------------------------
 
-def test_create_command_returns_cmd_id(monkeypatch):
-    cursor = FakeCursor()
-    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands",
-            json={"node": "s03", "cmd": "SET_TARGET", "arg": "s05"},
-            headers=AUTH,
-        )
-    assert response.status_code == 201
-    assert response.get_json()["cmd_id"].startswith("C")
 
 
-def test_pending_commands_expires_stale_then_claims(monkeypatch):
-    cursor = FakeCursor(fetchall=[("C1", "s03", "PING", "")])
-    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
-    with main.app.test_client() as client:
-        response = client.get("/api/commands/pending", headers=AUTH)
-    assert response.status_code == 200
-    assert response.get_json()["commands"] == [
-        {"cmd_id": "C1", "node": "s03", "cmd": "PING", "arg": ""}
-    ]
-    # defense-in-depth: the claim endpoint expires stale pending in the same txn
-    assert "status='expired'" in sql_of(cursor)
 
 
-def test_pending_commands_requires_auth():
-    with main.app.test_client() as client:
-        response = client.get("/api/commands/pending")
-    assert response.status_code == 401
 
 
-def test_command_ack_unknown_returns_404(monkeypatch):
-    cursor = FakeCursor(fetchone=None)  # UPDATE ... RETURNING matched no row
-    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/ack",
-            json={"node": "s03", "cmd_id": "Cdead", "result": "OK"},
-            headers=AUTH,
-        )
-    assert response.status_code == 404
 
 
-def test_command_ack_known_returns_success(monkeypatch):
-    cursor = FakeCursor(fetchone=("Cabc",))
-    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
-    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: None)
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/ack",
-            json={"node": "s03", "cmd_id": "Cabc", "result": "OK"},
-            headers=AUTH,
-        )
-    assert response.status_code == 200
-    query, params = cursor.executed[0]
-    assert "AND node=%s" in query
-    assert params[-1] == "s03"
 
 
-def test_command_ack_rejects_bad_node(monkeypatch):
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/ack",
-            json={"node": "nope", "cmd_id": "Cabc", "result": "OK"},
-            headers=AUTH,
-        )
-    assert response.status_code == 400
 
 
-def test_command_status_unknown_returns_404(monkeypatch):
-    monkeypatch.setattr(main, "db_fetch", lambda *a, **k: [])
-    with main.app.test_client() as client:
-        response = client.get("/api/commands/Cnope")
-    assert response.status_code == 404
 
 
-def test_list_commands_by_node_maps_rows(monkeypatch):
-    row = ("C1", "s03", "PING", "", "acked", "PONG", 1.0, 2.0, 3.0)
-    monkeypatch.setattr(main, "db_fetch", lambda *a, **k: [row])
-    with main.app.test_client() as client:
-        response = client.get("/api/commands?node=s03")
-    assert response.status_code == 200
-    body = response.get_json()["commands"][0]
-    assert body["cmd_id"] == "C1"
-    assert body["status"] == "acked"
-    assert body["result"] == "PONG"
 
 
-def test_list_commands_rejects_bad_node():
-    with main.app.test_client() as client:
-        response = client.get("/api/commands?node=bad")
-    assert response.status_code == 200
-    assert response.get_json()["commands"] == []
 
 
 # --- the new pending-TTL sweep ----------------------------------------------
 
-def test_check_command_timeouts_expires_sent_and_pending(monkeypatch):
-    cursor = FakeCursor()
-    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
-    main.check_command_timeouts()
-    sql = sql_of(cursor)
-    assert "status='timeout'" in sql and "status='sent'" in sql
-    assert "status='expired'" in sql and "status='pending'" in sql
 
 
 # --- write-path reconnect (Neon drops idle connections) ---------------------
@@ -271,20 +168,6 @@ def _flaky_transaction(cursor, failures):
     return _tx
 
 
-def test_write_retries_once_after_dropped_connection(monkeypatch):
-    cursor = FakeCursor(fetchone=("Cabc",))
-    monkeypatch.setattr(main, "db_transaction", _flaky_transaction(cursor, 1))
-    monkeypatch.setattr(main, "_discard_connection", lambda: None)
-    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: None)
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/ack",
-            json={"node": "s03", "cmd_id": "Cabc", "result": "OK"},
-            headers=AUTH,
-        )
-    # Previously the first statement after an idle period surfaced as a 500.
-    assert response.status_code == 200
-    assert len(cursor.executed) == 1  # the retry ran the statement exactly once
 
 
 def test_write_gives_up_after_second_failure(monkeypatch):
@@ -292,7 +175,7 @@ def test_write_gives_up_after_second_failure(monkeypatch):
     monkeypatch.setattr(main, "db_transaction", _flaky_transaction(cursor, 2))
     monkeypatch.setattr(main, "_discard_connection", lambda: None)
     with pytest.raises(psycopg.OperationalError):
-        main.db_execute("UPDATE commands SET status='x'")
+        main.db_execute("UPDATE telemetry_events SET received_at=received_at")
     assert cursor.executed == []
 
 
@@ -301,7 +184,7 @@ def test_failed_transaction_discards_the_connection(monkeypatch):
     discarded = []
     monkeypatch.setattr(main, "db_transaction", _flaky_transaction(cursor, 1))
     monkeypatch.setattr(main, "_discard_connection", lambda: discarded.append(True))
-    main.db_execute("UPDATE commands SET status='x'")
+    main.db_execute("UPDATE telemetry_events SET received_at=received_at")
     assert discarded == [True]
 
 
@@ -317,56 +200,6 @@ def test_backlog_sample_is_not_considered_online():
 def test_recent_sample_and_delivery_are_online():
     now = 10_000.0
     assert main._is_fresh_sample(now - 1, now - 1, now)
-
-
-# --- dispatch_failed: a claimed command that never reached the radio ----------
-
-def test_dispatch_failed_requires_auth():
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/dispatch_failed", json={"node": "s03", "cmd_id": "Cabc"}
-        )
-    assert response.status_code == 401
-
-
-def test_dispatch_failed_marks_only_a_command_still_in_flight(monkeypatch):
-    cursor = FakeCursor(fetchone=("Cabc",))
-    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
-    monkeypatch.setattr(main, "send_discord_alert", lambda *a, **k: None)
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/dispatch_failed",
-            json={"node": "s03", "cmd_id": "Cabc", "reason": "port unavailable"},
-            headers=AUTH,
-        )
-    assert response.status_code == 200
-    query, params = cursor.executed[0]
-    assert "status='dispatch_failed'" in query
-    # An ACK that raced us in wins: it proves the node did get the command.
-    assert "AND status='sent'" in query
-    assert params[0] == "ERR_DISPATCH: port unavailable"
-
-
-def test_dispatch_failed_on_already_settled_command_returns_404(monkeypatch):
-    cursor = FakeCursor(fetchone=None)
-    monkeypatch.setattr(main, "db_transaction", fake_transaction(cursor))
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/dispatch_failed",
-            json={"node": "s03", "cmd_id": "Cabc", "reason": "port unavailable"},
-            headers=AUTH,
-        )
-    assert response.status_code == 404
-
-
-def test_dispatch_failed_rejects_oversized_reason(monkeypatch):
-    with main.app.test_client() as client:
-        response = client.post(
-            "/api/commands/dispatch_failed",
-            json={"node": "s03", "cmd_id": "Cabc", "reason": "x" * 201},
-            headers=AUTH,
-        )
-    assert response.status_code == 400
 
 
 # --- threshold alerts must describe now, not a backlog replay ----------------
