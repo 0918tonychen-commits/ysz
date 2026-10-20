@@ -202,6 +202,32 @@ def test_recent_sample_and_delivery_are_online():
     assert main._is_fresh_sample(now - 1, now - 1, now)
 
 
+def test_raw_history_export_includes_mcount_on_request(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "db_fetch",
+        lambda *a, **k: [
+            (1_700_000_000.0, {"temperature": 25.5}, {"mcount": 41}),
+            (1_700_000_001.0, {"temperature": 25.6}, {"mcount": 42}),
+        ],
+    )
+
+    result = main._history("s03", 0, include_mcount=True)
+
+    assert result["temperature"] == [25.5, 25.6]
+    assert result["mcount"] == [41, 42]
+
+
+def test_chart_history_does_not_gain_an_mcount_series(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "db_fetch",
+        lambda *a, **k: [(1_700_000_000.0, {"temperature": 25.5}, {"mcount": 41})],
+    )
+
+    assert "mcount" not in main._history("s03", 0)
+
+
 # --- threshold alerts must describe now, not a backlog replay ----------------
 
 def test_stale_backlog_reading_does_not_raise_a_current_alert(monkeypatch):

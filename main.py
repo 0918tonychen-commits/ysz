@@ -18,6 +18,7 @@ from typing import Any, TypeVar
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 import psycopg
+from psycopg.abc import Query
 from psycopg.types.json import Jsonb
 import requests
 
@@ -109,7 +110,7 @@ def db_run(operation: Callable[[psycopg.Cursor[Any]], T]) -> T:
     raise AssertionError("unreachable")
 
 
-def db_fetch(query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+def db_fetch(query: Query, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
     def fetch(cursor: psycopg.Cursor[Any]) -> list[tuple[Any, ...]]:
         cursor.execute(query, params)
         return cursor.fetchall()
@@ -117,11 +118,11 @@ def db_fetch(query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
     return db_run(fetch)
 
 
-def db_execute(query: str, params: tuple[Any, ...] = ()) -> None:
+def db_execute(query: Query, params: tuple[Any, ...] = ()) -> None:
     db_run(lambda cursor: cursor.execute(query, params))
 
 
-def db_claim(query: str, params: tuple[Any, ...] = ()) -> bool:
+def db_claim(query: Query, params: tuple[Any, ...] = ()) -> bool:
     """Run an ``... RETURNING`` statement; True when it matched a row."""
 
     def claim(cursor: psycopg.Cursor[Any]) -> bool:
@@ -616,33 +617,44 @@ def healthz():
     )
 
 
-def _history(node: str, cutoff: float) -> dict[str, Any]:
+def _history(
+    node: str, cutoff: float, *, include_mcount: bool = False
+) -> dict[str, Any]:
     if not NODE_RE.fullmatch(node):
         return {"labels": []}
     rows = db_fetch(
-        """SELECT recorded_at,data FROM telemetry_events
+        """SELECT recorded_at,data,meta FROM telemetry_events
            WHERE node_id=%s AND recorded_at >= %s
            ORDER BY recorded_at,event_id""",
         (node, cutoff),
     )
-    sensors = sorted({key for _ts, data in rows for key in data})
+    sensors = sorted({key for _ts, data, _meta in rows for key in data})
     result: dict[str, Any] = {
         "labels": [
             datetime.fromtimestamp(ts, timezone(timedelta(hours=8))).strftime(
                 "%m/%d %H:%M:%S"
             )
-            for ts, _data in rows
+            for ts, _data, _meta in rows
         ]
     }
     for sensor in sensors:
-        result[sensor] = [data.get(sensor) for _ts, data in rows]
+        result[sensor] = [data.get(sensor) for _ts, data, _meta in rows]
+    if include_mcount:
+        result["mcount"] = [meta.get("mcount") for _ts, _data, meta in rows]
     return result
 
 
 @app.get("/api/history_range/<node>")
 def history_range(node: str):
     days = max(1, min(request.args.get("days", 7, type=int), 7))
-    return jsonify(_history(node, time.time() - days * 86400))
+    include_mcount = request.args.get("include_mcount") == "1"
+    return jsonify(
+        _history(
+            node,
+            time.time() - days * 86400,
+            include_mcount=include_mcount,
+        )
+    )
 
 
 @app.get("/api/history_hourly/<node>")
